@@ -164,3 +164,31 @@ describe("dispatchAgentEvent subagent lifecycle", () => {
     }));
   });
 });
+
+describe("dispatchAgentEvent auto compaction failure", () => {
+  it("leaves a visible divider carrying the backend reason", () => {
+    const appendContextCompactionDivider = vi.fn();
+    const controller = {
+      isOpenProjectSession: () => true,
+      getRuntime: () => ({ manualAbortRequested: false }),
+      cancelAgentEndGrace: vi.fn(),
+      refreshStreamWatchdog: vi.fn(),
+      appendContextCompactionDivider,
+    } as unknown as AgentEventRuntimeController;
+
+    // 自动压缩失败是静默路径：必须落一条可见记录，且带上真实原因。
+    dispatchAgentEvent({
+      type: "auto_compaction_failed",
+      sessionId: "session-1",
+      message: "SESSION_BUSY",
+    } as unknown as Parameters<typeof dispatchAgentEvent>[0], controller);
+
+    expect(appendContextCompactionDivider).toHaveBeenCalledWith(
+      "session-1",
+      undefined,
+      "failed",
+      undefined,
+      "SESSION_BUSY",
+    );
+  });
+});

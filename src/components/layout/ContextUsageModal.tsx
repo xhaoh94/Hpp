@@ -20,7 +20,6 @@ import {
   loadContextCompactionThreshold,
   saveContextCompactionThreshold,
 } from "@/lib/context-compaction-threshold";
-import { GENERAL_SETTINGS_UPDATED_EVENT } from "@/lib/app-events";
 import "./ContextUsageModal.css";
 
 // 与截图一致的分类配色：蓝、绿、黄、紫、粉、青，按明细顺序取用。
@@ -28,10 +27,10 @@ const BREAKDOWN_COLORS = ["#6b8afd", "#3ecf8e", "#f5a623", "#b06bff", "#ff6bd6",
 
 // 精度 → 脚注说明：估算和"后端上报值"都不能当成独立测量的精确值来讲。
 const SOURCE_NOTES: Record<SessionContextUsage["source"], string> = {
-  exact: "用量来自后端精确统计",
-  official: "用量来自后端上报值",
-  estimated: "用量为估算值",
-  unknown: "用量来源未知",
+  exact: "精确统计",
+  official: "后端上报",
+  estimated: "估算",
+  unknown: "来源未知",
 };
 
 /** 阈值标记的落点：按指针的 clientX 换算成轨道内的百分比。 */
@@ -44,6 +43,15 @@ function percentFromTrack(track: HTMLElement | null, clientX: number): number {
 
 type ContextUsageModalProps = {
   usage?: SessionContextUsage;
+  /**
+   * 模型目录里的上下文窗口。用量事件没来（新会话、刚切换模型）时拿它当分母，
+   * 弹窗至少能显示「—/200K」和阈值对应的 token 数，而不是一片空白。
+   */
+  fallbackContextWindow?: number;
+  /** 当前会话使用的渠道 + 模型；阈值按它分别保存，缺省时退回 usage.model。 */
+  model?: { provider: string; id: string } | null;
+  /** 当前会话 id：拖动阈值时立刻把这个值热更新到该会话，不必重开。 */
+  sessionId?: string | null;
   /** 标题栏的上下文圆环：弹窗锚定在它旁边，而不是贴在窗口左上角。 */
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
@@ -57,6 +65,9 @@ type ContextUsageModalProps = {
 
 export function ContextUsageModal({
   usage,
+  fallbackContextWindow,
+  model,
+  sessionId,
   anchorRef,
   onClose,
   onCompact,
@@ -69,6 +80,9 @@ export function ContextUsageModal({
   const [threshold, setThreshold] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
   const [draggingThreshold, setDraggingThreshold] = useState(false);
   const trackRef = useRef<HTMLDivElement>(null);
+  // 阈值的作用域是「渠道 + 模型」：优先用当前选择，用量事件里带着模型时兜底。
+  const thresholdModel = model ?? usage?.model ?? null;
+  const thresholdEditable = !!thresholdModel?.provider && !!thresholdModel?.id;
   /** 拖动中的临时值：松手才落盘，避免拖动过程反复写 settings.json。 */
   const dragRef = useRef<{ active: boolean; value: number; start: number }>({
     active: false,
@@ -78,23 +92,24 @@ export function ContextUsageModal({
 
   useEffect(() => {
     let alive = true;
-    void loadContextCompactionThreshold().then((loaded) => {
+    // 阈值按渠道 + 模型分别保存：切换模型后要重新读，不能沿用上一个模型的值。
+    void loadContextCompactionThreshold(thresholdModel).then((loaded) => {
       if (alive) setThreshold(loaded);
     });
     return () => { alive = false; };
-  }, []);
+  }, [thresholdModel?.provider, thresholdModel?.id]);
 
   const applyThreshold = (next: number) => {
     const normalized = normalizeContextCompactionThreshold(next);
     setThreshold(normalized);
-    void saveContextCompactionThreshold(normalized);
-    // 让正在跑的自动压缩监测立刻用上新阈值，不用重开会话。
-    window.dispatchEvent(new CustomEvent(GENERAL_SETTINGS_UPDATED_EVENT, { detail: {} }));
+    // 只写入触发点：主进程拿它判定，拖动本身不构成「到达阈值」，也不会压缩。
+    void saveContextCompactionThreshold(thresholdModel, normalized, { sessionId });
   };
 
   // 整条进度条都是拖拽区：点哪阈值就跳到哪，按住可以直接拖走。
   // 只把小标记做成纯视觉元素（pointer-events: none），就不会出现「手柄太小抓不住」。
   const handleThresholdPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!thresholdEditable) return;
     const percent = percentFromTrack(trackRef.current, event.clientX);
     dragRef.current = { active: true, value: percent, start: threshold };
     setDraggingThreshold(true);
@@ -125,6 +140,7 @@ export function ContextUsageModal({
   };
 
   const handleThresholdKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!thresholdEditable) return;
     const step = event.shiftKey ? 10 : 5;
     let next: number;
     switch (event.key) {
@@ -157,7 +173,7 @@ export function ContextUsageModal({
   const compactDisabled = isCompacting || !!compactDisabledReason || !onCompact;
   const compactTitle = isCompacting
     ? "正在压缩上下文"
-    : compactDisabledReason || "手动压缩上下文（对话太长时可先压缩再继续）";
+    : compactDisabledReason || "手动压缩上下文";
 
   const handleCompact = () => {
     if (compactDisabled) return;
@@ -179,12 +195,19 @@ export function ContextUsageModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  const contextWindow = usage?.contextWindow;
+  // 窗口优先用事件上报的，没有就退回模型目录里的静态配置。
+  const contextWindow = usage?.contextWindow ?? fallbackContextWindow;
   const usedTokens = usage?.usedTokens;
   const usageRatio = contextWindow && usedTokens !== undefined
     ? Math.min(1, usedTokens / contextWindow)
     : undefined;
-  const percentText = `${((usageRatio ?? 0) * 100).toFixed(1)}%`;
+  // 没有用量时不拿 0.0% 冒充；也不要用破折号堆成一片横杠，直接说「暂无用量」。
+  const percentText = usageRatio === undefined ? "" : `${(usageRatio * 100).toFixed(1)}%`;
+  const usageSummary = usedTokens !== undefined
+    ? `已使用 ${formatContextTokenAmount(usedTokens)}${contextWindow ? `/${formatContextTokenAmount(contextWindow)}` : ""}`
+    : contextWindow
+      ? `上下文窗口 ${formatContextTokenAmount(contextWindow)}`
+      : "窗口未知";
   // 明细的 token 已按实际总量归一化，因此可直接换算成占窗口的比例。
   const segments = (usage?.breakdown || []).map((entry, index) => ({
     id: entry.id,
@@ -194,6 +217,15 @@ export function ContextUsageModal({
     color: BREAKDOWN_COLORS[index % BREAKDOWN_COLORS.length],
   }));
   const breakdownTotal = segments.reduce((sum, segment) => sum + segment.tokens, 0);
+
+  // 阈值由主进程统一判定：所有 Agent 都用各自已有的 compact() 接口，
+  // 不用改各家 CLI 配置，也不需要重开会话。判定只在回合结束时发生，
+  // 所以拖动阈值本身不会触发压缩，要等下一次对话结束。
+  // 提示统一成一行「上限 + 换算后的 token」：其它信息交给滑块位置和 tooltip。
+  const thresholdTokens = contextWindow ? Math.round(contextWindow * threshold / 100) : undefined;
+  const thresholdHint = thresholdTokens
+    ? `上下文上限 · 约 ${formatContextTokenAmount(thresholdTokens)}`
+    : "上下文上限";
 
   return (
     <div className="context-usage-overlay" onMouseDown={onClose}>
@@ -227,25 +259,27 @@ export function ContextUsageModal({
         </div>
 
         <div className="context-usage-summary">
-          <strong>{percentText}</strong>
-          <span>
-            已使用 {usedTokens !== undefined ? formatContextTokenAmount(usedTokens) : "—"}
-            {contextWindow ? `/${formatContextTokenAmount(contextWindow)}` : ""}
-          </span>
+          {usageRatio !== undefined
+            ? <strong>{percentText}</strong>
+            : <strong className="context-usage-summary-idle">暂无用量</strong>}
+          <span>{usageSummary}</span>
         </div>
 
         <div className="context-threshold-row">
           <div
-            className={`context-threshold-track${draggingThreshold ? " is-dragging" : ""}`}
+            className={`context-threshold-track${draggingThreshold ? " is-dragging" : ""}${thresholdEditable ? "" : " is-disabled"}`}
             ref={trackRef}
             role="slider"
-            tabIndex={0}
+            tabIndex={thresholdEditable ? 0 : -1}
             aria-label="自动压缩阈值"
             aria-valuemin={CONTEXT_THRESHOLD_MIN}
             aria-valuemax={CONTEXT_THRESHOLD_MAX}
             aria-valuenow={threshold}
             aria-valuetext={`${threshold}%`}
-            title="点击或拖动进度条调整自动压缩阈值"
+            aria-disabled={!thresholdEditable}
+            title={thresholdEditable
+              ? "拖动调整自动压缩阈值"
+              : "选择模型后可调整"}
             onPointerDown={handleThresholdPointerDown}
             onPointerMove={handleThresholdPointerMove}
             onPointerUp={handleThresholdPointerUp}
@@ -256,12 +290,12 @@ export function ContextUsageModal({
             <div className="context-usage-bar" aria-hidden="true">
               {segments.length > 0
                 ? segments.map((segment) => (
-                    <span
-                      key={segment.id}
-                      className="context-usage-bar-segment"
-                      style={{ width: `${segment.ratio * 100}%`, backgroundColor: segment.color }}
-                    />
-                  ))
+                  <span
+                    key={segment.id}
+                    className="context-usage-bar-segment"
+                    style={{ width: `${segment.ratio * 100}%`, backgroundColor: segment.color }}
+                  />
+                ))
                 : usageRatio !== undefined
                   ? <span className="context-usage-bar-segment used" style={{ width: `${usageRatio * 100}%` }} />
                   : null}
@@ -275,12 +309,7 @@ export function ContextUsageModal({
           <strong className="context-threshold-value">{threshold}%</strong>
         </div>
 
-        <p className="context-threshold-hint">
-          用量到达后，回合结束时自动压缩
-          {contextWindow
-            ? ` · 阈值约 ${formatContextTokenAmount(Math.round(contextWindow * threshold / 100))}`
-            : ""}
-        </p>
+        <p className="context-threshold-hint">{thresholdHint}</p>
 
         {segments.length > 0 ? (
           <ul className="context-usage-list">
@@ -297,13 +326,17 @@ export function ContextUsageModal({
             ))}
           </ul>
         ) : (
-          <p className="context-usage-empty">当前 Agent 未提供上下文构成明细。</p>
+          <p className="context-usage-empty">无明细</p>
         )}
 
         <div className="context-usage-footnote">
           {usage?.model ? `${usage.model.provider}/${usage.model.id} · ` : ""}
-          {!usage ? "暂无用量数据，发送一次消息后即可看到" : SOURCE_NOTES[usage.source]}
-          {usage && !contextWindow ? " · 当前模型未提供上下文窗口" : ""}
+          {usageRatio === undefined
+            ? "发送一次消息后显示用量"
+            : usage
+              ? SOURCE_NOTES[usage.source]
+              : ""}
+          {!contextWindow ? " · 窗口未知" : ""}
         </div>
       </div>
     </div>

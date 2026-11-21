@@ -217,6 +217,22 @@ describe("OpenCode V2 protocol adapter", () => {
     expect(v2.normalizeEvent({ type: "session.compaction.ended", data: { sessionID: "ses_1" } }))
       .toEqual({ type: "session.compacted", properties: { sessionID: "ses_1" } });
 
+    // 压缩失败同样是「压缩结束」，不是回合错误：当成 session.error 会在界面上
+    // 冒一条 OpenCode 错误，而真正该收尾的那条「压缩中」分隔线反而永远挂着。
+    expect(v2.normalizeEvent({
+      type: "session.compaction.failed",
+      data: {
+        sessionID: "ses_1",
+        error: { type: "compaction.unavailable", message: "Nothing to compact yet" },
+      },
+    })).toEqual({
+      type: "session.compacted",
+      properties: {
+        sessionID: "ses_1",
+        error: { type: "compaction.unavailable", message: "Nothing to compact yet" },
+      },
+    });
+
     // 未知事件保持透传，交给现有「不认识就忽略」的逻辑。
     expect(v2.normalizeEvent({ type: "session.inbox.enqueued", data: { sessionID: "ses_1" } }))
       .toEqual({ type: "session.inbox.enqueued", properties: { sessionID: "ses_1" } });

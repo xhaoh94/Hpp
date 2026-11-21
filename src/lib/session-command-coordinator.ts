@@ -973,7 +973,8 @@ export async function sendMessage(input: {
         createdAt: existing?.createdAt ?? Date.now(),
         status: "queued" as const,
       };
-      // upsertQueuedMessage 对不存在的项插到队首；普通发送仍追加到队尾。
+      // upsertQueuedMessage 对不存在的项插到待发送区最前，但排在已插话（sending）的项之后，
+      // 多条插话的列表顺序才和实际注入顺序一致；普通发送仍追加到队尾。
       if (existing || input.queuePosition === "front") chat.upsertQueuedMessage(queued);
       else chat.enqueueMessage(queued);
       if (message.forkContextUsed) clearForkContext(input.sessionId);

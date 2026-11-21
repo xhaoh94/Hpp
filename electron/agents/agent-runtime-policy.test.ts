@@ -43,6 +43,7 @@ vi.mock("./agent-plugin-registry", () => ({
     removePlugin: vi.fn(async () => ({ success: true, agents: [] })),
     inspectInstallCandidate: vi.fn(),
     installFromPath: vi.fn(),
+    onSessionEvent: vi.fn(() => () => {}),
   }),
 }));
 

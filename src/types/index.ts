@@ -529,6 +529,26 @@ export interface ElectronAPI {
   agentReloadConfig: (agentId: string, sessionId?: string) => Promise<AgentReloadConfigResult>;
   agentSetCompactionConfig: (config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
   agentSetAgentCompactionConfig: (agentId: string, config: AgentCompactionConfig) => Promise<AgentCompactionConfigResult>;
+  /** 更新智能压缩阈值（%）：用量到达窗口该比例、回合结束时由主进程统一触发压缩。 */
+  agentSetCompactionThreshold: (
+    percent: number,
+    target?: { sessionId?: string; model?: { provider: string; id: string } },
+  ) => Promise<AgentCompactionConfigResult>;
+  /** 只登记会话当前模型（不切换后端），让主进程能按「渠道 + 模型」解析压缩阈值。 */
+  agentSyncSessionModel: (
+    sessionId: string,
+    provider: string,
+    modelId: string,
+  ) => Promise<{ success: boolean; error?: string }>;
+  /**
+   * 同步模型目录里的上下文窗口：后端上报的用量不带窗口时，
+   * 主进程用它算「用量 / 窗口」比例判定自动压缩。
+   */
+  agentSyncContextWindow: (
+    sessionId: string,
+    contextWindow: number,
+    model?: { provider: string; id: string },
+  ) => Promise<{ success: boolean; error?: string }>;
   agentSetAgentSubagentConfig: (agentId: string, config: AgentSubagentConfig) => Promise<AgentSubagentConfigResult>;
   agentConfigSaveSubagent: (agentId: string, config: AgentSubagentConfig) => Promise<{ success: boolean; error?: string; config?: AgentSubagentConfig }>;
   agentConfigList: (agentId: string) => Promise<AgentConfigResult>;

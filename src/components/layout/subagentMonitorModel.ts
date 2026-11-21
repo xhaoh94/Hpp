@@ -1,5 +1,9 @@
 import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
-import { getEffectiveProcessSubagents, type ProcessSubagentUsage } from "@shared/process-view";
+import {
+  getEffectiveProcessSubagents,
+  type ProcessSubagentStopReason,
+  type ProcessSubagentUsage,
+} from "@shared/process-view";
 
 export type MonitoredSubagent = AgentSubagent & {
   messageId: string;
@@ -72,6 +76,23 @@ export const formatSubagentUsage = (usage?: ProcessSubagentUsage): string => {
 export const getSubagentElapsedMs = (subagent: AgentSubagent, now: number): number | undefined => {
   if (!subagent.startedAt) return undefined;
   return Math.max(0, (subagent.completedAt ?? now) - subagent.startedAt);
+};
+
+const SUBAGENT_STATUS_TEXT: Record<string, string> = {
+  pending: "等待中",
+  running: "工作中",
+  completed: "已完成",
+  error: "失败",
+  interrupted: "已中断",
+};
+
+/** 状态文案：超时优先于状态本身，否则「失败」会把超时说成普通报错。 */
+export const formatSubagentStatusLabel = (
+  status?: AgentSubagent["status"],
+  stopReason?: ProcessSubagentStopReason,
+): string => {
+  if (stopReason === "timeout") return "已超时";
+  return (status && SUBAGENT_STATUS_TEXT[status]) || "";
 };
 
 /** 距最后一次活动多久没更新。 */

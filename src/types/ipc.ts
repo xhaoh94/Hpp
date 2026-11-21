@@ -118,6 +118,11 @@ export interface AgentEvent {
   contextEstimated?: boolean;
   /** 上下文构成明细；pi / claude 能提供。 */
   contextBreakdown?: Array<{ id: string; label: string; tokens: number }>;
+  /**
+   * 该用量来自上下文压缩（摘要）请求本身：它的输入是压缩前的整段历史，
+   * 可以计入 Token 统计，但不能当作压缩后的上下文占用。
+   */
+  compaction?: boolean;
   pendingUIRevision?: unknown;
   clientUserMessageId?: unknown;
   threadId?: unknown;

@@ -23,6 +23,8 @@ type Internals = {
   currentModelId: string | null;
   currentThinkingLevel: string;
   modelVariants: Map<string, string[]>;
+  models: Array<{ provider: string; id: string; contextWindow?: number }>;
+  activeResponseModel: { provider: string; id: string } | null;
 };
 
 const asInternals = (agent: OpenCodeAgent) => agent as unknown as Internals;
@@ -116,6 +118,13 @@ describe("OpenCode V2 protocol wiring", () => {
     let compactPath = "";
     let compactBody: Record<string, unknown> | null = null;
     const port = await startServer((request, response) => {
+      if (request.url === "/api/event") {
+        // 保持连接：空闲压缩自己开流，结束事件由测试直接喂给 handleSSEEvent。
+        // writeHead 只是排队，flushHeaders 才会真的把响应头发出去。
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.flushHeaders();
+        return;
+      }
       if (request.url === "/api/session/ses_compact/compact") {
         compactPath = request.url;
         let body = "";
@@ -150,7 +159,8 @@ describe("OpenCode V2 protocol wiring", () => {
     // compact() 只要求进程已启动；isIdle 对新的 agent 实例默认为 true。
     (agent as unknown as { process: unknown }).process = {};
 
-    await agent.compact();
+    // 2.x 的 compact 会一直等到 SSE 的结束事件，所以这里不能 await 完再喂事件。
+    const compacting = agent.compact();
     await waitFor(() => events.some((event) => event.type === "context_compaction"));
 
     expect(compactPath).toBe("/api/session/ses_compact/compact");
@@ -158,11 +168,13 @@ describe("OpenCode V2 protocol wiring", () => {
     expect(compactBody).toEqual({});
     const started = events.find((event) => event.type === "context_compaction" && event.phase === "started");
     expect(started).toBeTruthy();
+    // 分隔线用服务端返回的压缩消息 id，SSE 的结束事件才能接着同一个 id 收尾。
+    expect(started?.id).toBe("msg_compact");
     // POST 只是受理，不能提前报完成；完成由 SSE 的 session.compacted 驱动。
     expect(events.some((event) => event.type === "context_compaction" && event.phase === "completed")).toBe(false);
 
     internals.handleSSEEvent("session.compacted", { sessionID: "ses_compact" });
-    await waitFor(() => events.some((event) => event.type === "context_compaction" && event.phase === "completed"));
+    await compacting;
 
     expect(events).toContainEqual(expect.objectContaining({
       type: "context_compaction",
@@ -229,6 +241,107 @@ describe("OpenCode V2 protocol wiring", () => {
       cacheInputTokens: 30,
       contextTokens: 140,
       contextPrecision: "official",
+    }));
+  });
+
+  // 主进程的自动压缩判定需要 usedTokens / contextWindow 两个值；OpenCode 的
+  // 用量事件只给 tokens。窗口必须在后端补上，否则阈值永远不会被判定为「到达」。
+  it("attaches the context window to V2 usage events", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = asInternals(agent);
+    internals.protocol = getOpenCodeProtocol("v2");
+    internals.sessionId = "ses_usage";
+    internals.currentProviderId = "opencode";
+    internals.currentModelId = "deepseek-v4.1-flash-free";
+    internals.models = [{ provider: "opencode", id: "deepseek-v4.1-flash-free", contextWindow: 200_000 }];
+
+    internals.sseBuffer = `data: ${JSON.stringify({
+      id: "evt_usage",
+      created: Date.now(),
+      type: "session.step.ended",
+      data: {
+        sessionID: "ses_usage",
+        assistantMessageID: "msg_usage",
+        tokens: { input: 126_000, output: 20, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    })}${SSE_END}`;
+    internals.processSSEBuffer();
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      contextTokens: 126_000,
+      contextWindow: 200_000,
+    }));
+  });
+
+  // Hpp 没显式切过模型时 currentModelId 是空的：还得能从 step.started 上报的
+  // model 兜底，否则「用默认模型的会话」永远压不了。
+  it("falls back to the model reported by the running step", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = asInternals(agent);
+    internals.protocol = getOpenCodeProtocol("v2");
+    internals.sessionId = "ses_usage";
+    internals.currentProviderId = null;
+    internals.currentModelId = null;
+    internals.models = [{ provider: "opencode", id: "big-pickle", contextWindow: 200_000 }];
+
+    internals.sseBuffer = `data: ${JSON.stringify({
+      id: "evt_step",
+      created: Date.now(),
+      type: "session.step.started",
+      data: {
+        sessionID: "ses_usage",
+        assistantMessageID: "msg_usage",
+        agent: "build",
+        model: { id: "big-pickle", providerID: "opencode" },
+      },
+    })}${SSE_END}`;
+    internals.processSSEBuffer();
+
+    internals.sseBuffer = `data: ${JSON.stringify({
+      id: "evt_usage",
+      created: Date.now(),
+      type: "session.step.ended",
+      data: {
+        sessionID: "ses_usage",
+        assistantMessageID: "msg_usage",
+        tokens: { input: 90_000, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    })}${SSE_END}`;
+    internals.processSSEBuffer();
+
+    expect(internals.activeResponseModel).toEqual({ provider: "opencode", id: "big-pickle" });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      contextTokens: 90_000,
+      contextWindow: 200_000,
+    }));
+  });
+
+  it("settles the compaction divider as failed when OpenCode refuses to compact", () => {
+    const events: AgentEvent[] = [];
+    const agent = new OpenCodeAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = asInternals(agent);
+    internals.protocol = getOpenCodeProtocol("v2");
+    internals.sessionId = "ses_compact";
+
+    internals.handleSSEEvent("message.part.updated", {
+      sessionID: "ses_compact",
+      part: { id: "msg_compact", messageID: "msg_compact", type: "compaction" },
+    });
+    internals.handleSSEEvent("session.compacted", {
+      sessionID: "ses_compact",
+      error: { type: "compaction.unavailable", message: "Nothing to compact yet" },
+    });
+
+    // 失败必须落到那条分隔线上，而不是一条孤零零的「OpenCode 错误」。
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "context_compaction",
+      id: "msg_compact",
+      phase: "failed",
+      detail: "Nothing to compact yet",
     }));
   });
 

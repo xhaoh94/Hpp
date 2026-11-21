@@ -307,6 +307,8 @@ interface ChatState {
     eventId?: string,
     sessionId?: string | null,
     state?: "running" | "completed" | "interrupted" | "failed",
+    /** 失败原因（可选）：自动压缩失败时带上后端返回的原因，别只给一句"失败"。 */
+    detail?: string,
   ) => void;
   /** 连续切换模型时不重复插 divider：最后一条就是 model_change 时原地替换为最新一次切换。 */
   upsertModelChangeDivider: (msg: ChatMessage, sessionId?: string | null) => void;
@@ -389,6 +391,24 @@ interface ChatState {
 const createMessageId = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
+/**
+ * 插话（引导发送）新增时的落点：待发送区最前，但要让位给已经在「等待插入」的插话。
+ *
+ * 多条插话按提交顺序注入 Agent，队列显示必须同序 —— 后发的那条压到前一条上面，
+ * 列表就和实际发送顺序对不上了。落在最后一个 sending 之后：正常情形下 sending
+ * 都在队首，新插话正好接在它们后面、普通排队前面。
+ */
+const insertGuidanceQueuedMessage = (
+  queue: QueuedMessage[],
+  item: QueuedMessage,
+): QueuedMessage[] => {
+  let insertAt = 0;
+  queue.forEach((queued, index) => {
+    if (queued.status === "sending") insertAt = index + 1;
+  });
+  return [...queue.slice(0, insertAt), item, ...queue.slice(insertAt)];
 };
 
 const findLastAssistantIndex = (messages: ChatMessage[]) => {
@@ -900,16 +920,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return next;
     })),
 
-  appendContextCompactionDivider: (eventId, sessionId, compactionState = "completed") =>
+  appendContextCompactionDivider: (eventId, sessionId, compactionState = "completed", detail) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
         const normalizedEventId = eventId?.trim();
+        const failureDetail = detail?.trim();
         const content = compactionState === "running"
           ? "上下文压缩中"
           : compactionState === "interrupted"
             ? "上下文压缩已中断"
             : compactionState === "failed"
-              ? "上下文压缩失败"
+              ? failureDetail
+                ? `上下文压缩失败：${failureDetail}`
+                : "上下文压缩失败"
               : "上下文已自动压缩";
         if (normalizedEventId) {
           const existingIndex = messages.findIndex((msg) =>
@@ -1539,7 +1562,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...s.messageQueues,
           [item.sessionId]: exists
             ? queue.map((queued) => (queued.id === item.id ? item : queued))
-            : [item, ...queue],
+            : insertGuidanceQueuedMessage(queue, item),
         },
       };
     }),

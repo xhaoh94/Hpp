@@ -582,6 +582,21 @@ function getOpenCodeContextWindow(modelInfo: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * 压缩失败事件的错误文案。
+ * 2.x 是 { type: "compaction.unavailable", message }，1.x 可能是裸字符串。
+ * 只取给人看的那一句，type 留给日志。
+ */
+function readCompactionFailure(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") return value.trim() || undefined;
+  const record = asRecord(value);
+  const data = asRecord(record.data);
+  const message = [record.message, data.message, record.detail, data.detail]
+    .find((item) => typeof item === "string" && item.trim());
+  return typeof message === "string" ? message.trim() : undefined;
+}
+
 function getModelVariants(modelInfo: unknown): string[] {
   const variants = asRecord(asRecord(modelInfo).variants);
   return Object.entries(variants).flatMap(([variantId, value]) => {
@@ -748,6 +763,18 @@ export class OpenCodeAgent {
   private modelsGeneration = 0;
   private currentModelId: string | null = null;
   private currentProviderId: string | null = null;
+  /**
+   * 最近一条 assistant 消息上报的模型。2.x 的 step 事件只给 tokens、不给窗口，
+   * 而 step.started 里带 model —— 记下来，用作 currentModel 缺失时的兜底：
+   * 否则「Hpp 没显式切过模型」的会话永远算不出上下文比例，自动压缩静默失效。
+   */
+  private activeResponseModel: { provider: string; id: string } | null = null;
+  /** 压缩进行中：期间上报的用量属于摘要请求，不能当成压缩后的上下文占用。 */
+  private compactionInFlight = false;
+  /** 缺窗口的日志只打一次，避免每个 token_usage 都刷屏。 */
+  private warnedMissingContextWindow = false;
+  /** v2 压缩的收尾等待：完成/失败事件从 SSE 回来时唤醒。 */
+  private compactionSettle: ((error?: string) => void) | null = null;
   private currentThinkingLevel = "medium";
   private modelVariants = new Map<string, string[]>();
   private eventSource: ReturnType<typeof http.get> | null = null;
@@ -1354,6 +1381,8 @@ export class OpenCodeAgent {
   private handleSSEDisconnect(request: ReturnType<typeof http.get>, detail: string) {
     if (this.eventSource !== request) return;
     this.eventSource = null;
+    // 压缩期间断流：结果无从得知，别让调用方干等到超时。
+    if (this.compactionSettle) this.settleCompaction(`OpenCode 事件流断开：${detail}`);
     if (this.turnActive) this.failActiveTurn("OpenCode event stream disconnected", detail);
   }
 
@@ -1422,6 +1451,7 @@ export class OpenCodeAgent {
     const id = this.normalizeCompactionMessageId(value);
     if (!id || this.settledCompactionIds.has(id) || this.activeCompactionId === id) return;
     this.activeCompactionId = id;
+    this.compactionInFlight = true;
     this.emitEvent({ type: "context_compaction", id, phase: "started" });
   }
 
@@ -1433,6 +1463,7 @@ export class OpenCodeAgent {
     const id = this.normalizeCompactionMessageId(value) || this.activeCompactionId;
     if (!id || this.settledCompactionIds.has(id)) return;
     this.settledCompactionIds.add(id);
+    this.compactionInFlight = false;
     this.emitEvent({ type: "context_compaction", id, phase, detail });
     if (this.activeCompactionId === id) this.activeCompactionId = null;
   }
@@ -1461,7 +1492,17 @@ export class OpenCodeAgent {
       if (!isTrackedSubagent || !isOpenCodeSubagentInteractionEvent(eventType)) return;
     }
     if (eventType === "session.compacted") {
-      this.emitCompactionFinished(this.activeCompactionId);
+      // v2 的压缩结束（session.compaction.ended / failed）走这里：
+      // 失败会带上 { type, message }，必须一起收尾，否则那条分隔线会一直转。
+      const failure = readCompactionFailure(props.error);
+      this.compactionInFlight = false;
+      // 空闲压缩是独立 execution：结束之后后端就该是空闲的。先断开事件流，
+      // 这样紧接着发出的 context_compaction 终态能让注册表的 idle 探测
+      // 立刻看到 true，渲染层那条分隔线才会收尾；等到 compact() 的 finally
+      // 才断，探测先看到「仍在忙」，就没人补 backend_idle 了。
+      if (!this.turnActive) this.stopSSEListener();
+      this.emitCompactionFinished(this.activeCompactionId, failure ? "failed" : "completed", failure);
+      this.settleCompaction(failure);
       return;
     }
     if (
@@ -1597,18 +1638,27 @@ export class OpenCodeAgent {
         const cacheInputTokens = Math.max(0, Number(props.cacheInputTokens) || 0);
         const contextTokens = Math.max(0, Number(props.contextTokens) || 0);
         if (inputTokens <= 0 && outputTokens <= 0 && contextTokens <= 0) break;
+        // 事件本身不带窗口大小，按当前模型补一份：Hpp 的自动压缩判定
+        // 需要 usedTokens / contextWindow 才能算比例，缺了就会静默不触发。
+        const contextWindow = this.resolveContextWindow();
         this.emitEvent({
           type: "token_usage",
           inputTokens,
           outputTokens,
           cacheInputTokens,
           ...(contextTokens > 0 ? { contextTokens } : {}),
+          ...(contextWindow ? { contextWindow } : {}),
           contextPrecision: "official",
+          // 摘要请求自己的用量：计入 Token 统计，但不能刷新上下文占用。
+          ...(this.compactionInFlight ? { compaction: true } : {}),
         });
         break;
       }
       case "message.updated":
         if (info.role === "assistant") {
+          // 2.x 的 session.step.started 被协议层翻译成这条事件并带上 model，
+          // 用来兜底缺失的 currentModel（见 resolveContextWindow）。
+          this.rememberResponseModel(info);
           if (info.summary) {
             // OpenCode 先创建 summary 消息，再流式写入摘要，最后才补上
             // finish/time.completed。创建阶段只能标记“开始”，不能提前发
@@ -1673,7 +1723,10 @@ export class OpenCodeAgent {
       case "message.part.added":
       case "message.part.updated": {
         this.rememberPartType(part);
-        this.emitPartTokenUsageDelta(part);
+        const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
+        // 摘要消息（compaction）也在流式产出 part，它的用量是「把整段历史发给模型做摘要」的输入，
+        // 不等于压缩后的上下文占用。打上标记，让上层只累计 Token 统计、不刷新上下文圆环。
+        this.emitPartTokenUsageDelta(part, this.isCompactionMessageId(partMessageId));
         if (process.env.HPP_OPENCODE_DEBUG_PARTS) {
           const dbgPart = asRecord(props.part || props);
           console.log("[opencode:debug-part]", JSON.stringify({
@@ -1685,7 +1738,6 @@ export class OpenCodeAgent {
             partKeys: Object.keys(dbgPart),
           }));
         }
-        const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
         if (normalizeEventName(part.type || props.type) === "compaction") {
           const normalizedPartMessageId = this.normalizeCompactionMessageId(partMessageId);
           if (normalizedPartMessageId === this.activeOpenCodeUserMessageId) this.activeOpenCodeUserMessageId = null;
@@ -1780,7 +1832,7 @@ export class OpenCodeAgent {
         const partType = part.type || props.type || this.partTypes.get(partId);
         const partMessageId = part.messageID || props.messageID || props.messageId || info.id;
         if (this.isCompactionMessageId(partMessageId) || info.summary === true) {
-          this.emitPartTokenUsageDelta(part);
+          this.emitPartTokenUsageDelta(part, true);
           if (partId) {
             this.partTypes.delete(partId);
             this.partTokenUsage.delete(partId);
@@ -1825,7 +1877,7 @@ export class OpenCodeAgent {
         }
         if (partId) this.partTypes.delete(partId);
         // part 结束时再对齐一次最终用量，随后清理追踪记录。
-        this.emitPartTokenUsageDelta(part);
+        this.emitPartTokenUsageDelta(part, this.isCompactionMessageId(partMessageId));
         if (partId) this.partTokenUsage.delete(partId);
         break;
       }
@@ -2114,6 +2166,7 @@ export class OpenCodeAgent {
     this.compactionMessageIds.clear();
     this.compactionEventIdByMessageId.clear();
     this.activeCompactionId = null;
+    this.compactionInFlight = false;
     this.settledCompactionIds.clear();
     this.partTokenUsage.clear();
     this.idleObservedWhileWaitingForUI = false;
@@ -2581,6 +2634,91 @@ export class OpenCodeAgent {
     return this.models;
   }
 
+  /** 目录里查某个模型的上下文窗口；没加载过就是没数据。 */
+  private lookupContextWindow(provider?: string | null, modelId?: string | null): number | undefined {
+    if (!provider || !modelId) return undefined;
+    const model = this.models.find((item) => item.provider === provider && item.id === modelId);
+    const value = Number(model?.contextWindow);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+
+  /**
+   * 解析「这次请求的上下文窗口」。
+   *
+   * Hpp 的自动压缩要靠 usedTokens / contextWindow 算比例，而 OpenCode 的
+   * 用量事件（1.x 的 part.tokens、2.x 的 step.ended）都不带窗口，只能自己补。
+   * 依次尝试：显式设置过的模型 → 最近一条 assistant 消息上报的模型。
+   * 都没有就顺手补一次目录（不阻塞上报），下一次事件就能算出来。
+   */
+  private resolveContextWindow(): number | undefined {
+    return this.lookupContextWindow(this.currentProviderId, this.currentModelId)
+      ?? this.lookupContextWindow(this.activeResponseModel?.provider, this.activeResponseModel?.id)
+      ?? this.refreshModelsForContextWindow();
+  }
+
+  private refreshModelsForContextWindow(): undefined {
+    // 没有运行时就没有可问的服务端（离线断言/测试里也会走这个分支）。
+    if (!this.process) return undefined;
+    if (this.models.length === 0) {
+      // 目录还没加载：补一次，下一次用量就能带上窗口。
+      if (!this.modelsRequest) void this.getModels().catch(() => undefined);
+      return undefined;
+    }
+    // 目录有了却找不到这个模型：窗口彻底无从得知，留一条日志，
+    // 免得以后又出现「用量在涨、压缩永远不触发」却查不到原因。
+    if (!this.warnedMissingContextWindow) {
+      this.warnedMissingContextWindow = true;
+      console.warn(
+        "[opencode] 模型目录中找不到当前模型的上下文窗口，智能压缩阈值无法判定:",
+        this.currentProviderId,
+        this.currentModelId,
+        this.activeResponseModel,
+      );
+    }
+    return undefined;
+  }
+
+  /** 记录 assistant 消息上报的模型（1.x 的 info、2.x step.started 翻译后都走这里）。 */
+  private rememberResponseModel(info: UnknownRecord): void {
+    const provider = typeof info.providerID === "string"
+      ? info.providerID
+      : typeof info.provider === "string"
+        ? info.provider
+        : "";
+    const id = typeof info.modelID === "string"
+      ? info.modelID
+      : typeof info.model === "string"
+        ? info.model
+        : "";
+    if (!provider || !id) return;
+    if (this.activeResponseModel?.provider === provider && this.activeResponseModel.id === id) return;
+    this.activeResponseModel = { provider, id };
+  }
+
+  /**
+   * 等一次压缩收尾（session.compaction.ended / failed）。
+   * 超时不算异常：压缩可能仍在服务端跑，只是这次没等到回执。
+   */
+  private waitCompactionSettled(timeoutMs: number): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (error?: string) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (this.compactionSettle === finish) this.compactionSettle = null;
+        resolve(error);
+      };
+      const timer = setTimeout(() => finish("压缩超时：OpenCode 未在预期时间内返回结果"), timeoutMs);
+      this.compactionSettle = finish;
+    });
+  }
+
+  /** 唤醒压缩等待。 */
+  private settleCompaction(detail?: string): void {
+    this.compactionSettle?.(detail);
+  }
+
   /** Set model for the session - stored and applied per-message */
   async setModel(provider: string, modelId: string) {
     const modelChanged = this.currentModelId !== modelId || this.currentProviderId !== provider;
@@ -2596,32 +2734,83 @@ export class OpenCodeAgent {
     this.emitEvent({ type: "model_changed", model: { id: modelId, provider } });
   }
 
-  /** 手动压缩：调用 OpenCode 的 summarize / compact 端点，进度由 SSE 的 compaction 事件驱动。 */
+  /**
+   * 手动/自动压缩。
+   *
+   * 1.x 的 summarize 是同步的：HTTP 返回即压缩完成。
+   * 2.x 的 /compact 只是「受理」（durably admit），真正执行是一次独立
+   * execution，结束信号（session.compaction.ended / failed）只走 SSE。
+   * 而 Hpp 的 SSE 是随回合开关的 —— 空闲时早就断了，所以必须在这里自己
+   * 开一条流并等它收尾，否则：请求发出去了、压缩也真跑了，但 Hpp 永远
+   * 收不到结束事件，那条「压缩中」分隔线就一直挂着，看起来像「没用」。
+   */
   async compact(): Promise<void> {
     if (!this.process || !this.sessionId) throw new Error("OpenCode is not running");
     if (!this.isIdle()) throw new Error("SESSION_BUSY");
     const compactionId = `opencode-compact-${Date.now()}`;
-    // 走统一入口：2.x 的完成通知来自 SSE 的 session.compacted，
-    // 只有记下 activeCompactionId 才能把本地这条 divider 收掉。
-    this.emitCompactionStarted(compactionId);
+
+    if (this.protocol.id !== "v2") {
+      this.emitCompactionStarted(compactionId);
+      try {
+        await this.httpPost(
+          this.protocol.summarizePaths(this.sessionId),
+          this.protocol.summarizeBody(this.currentProviderId, this.currentModelId),
+          180_000,
+        );
+      } catch (error) {
+        this.emitCompactionFinished(
+          compactionId,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
+        throw error;
+      }
+      this.emitCompactionFinished(compactionId);
+      return;
+    }
+
+    // 先把等待挂上：事件可能在 POST 的响应回来之前就到达。
+    const settled = this.waitCompactionSettled(175_000);
     try {
-      await this.httpPost(
+      let monitored = true;
+      try {
+        await this.startSSEListener();
+      } catch (error) {
+        // 连不上事件流也要把压缩请求发出去：压缩本身是有用的，
+        // 只是这次拿不到进度。退化成「受理即完成」，别让分隔线空转。
+        monitored = false;
+        console.warn("[opencode] compaction event stream unavailable:", error);
+      }
+      const response = await this.httpPost(
         this.protocol.summarizePaths(this.sessionId),
         this.protocol.summarizeBody(this.currentProviderId, this.currentModelId),
         180_000,
       );
+      // POST 返回的就是这条压缩消息本身（{ data: { id, type: "compaction" } }），
+      // 用它当分隔线 id，SSE 之后的事件就能接着同一个 id 收尾。
+      const responseId = this.normalizeCompactionMessageId(asRecord(asRecord(response).data).id);
+      const dividerId = responseId || compactionId;
+      this.emitCompactionStarted(dividerId);
+      if (!monitored) {
+        this.settleCompaction("未建立事件流，无法跟踪压缩进度");
+        this.emitCompactionFinished(dividerId);
+        return;
+      }
+      const failure = await settled;
+      // 超时/异常不能当成功：交给下面的 catch 补一条真实的失败终态。
+      // 否则「压缩中」永远收不掉，主进程也会一直把这个会话的用量读数当成压缩期数据忽略。
+      if (failure) throw new Error(failure);
     } catch (error) {
-      this.emitCompactionFinished(
-        compactionId,
-        "failed",
-        error instanceof Error ? error.message : String(error),
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      // 让等待立刻结束：否则那个 175s 的兜底定时器会一直挂着，
+      // 期间万一来个别的压缩事件还会去唤醒一个已经没人等的 Promise。
+      this.settleCompaction(message);
+      this.emitCompactionFinished(this.activeCompactionId || compactionId, "failed", message);
       throw error;
+    } finally {
+      // 压缩是独立 execution，跑完（或失败/超时）就把流关掉，恢复「空闲」。
+      this.stopSSEListener();
     }
-    // 1.x 的 summarize 是同步的：HTTP 返回即压缩完成。
-    // 2.x 的 /compact 只是「受理」（durably admit），真正执行在下一个 step
-    // 边界，完成事件由 SSE 的 session.compacted 驱动，这里不能提前收尾。
-    if (this.protocol.id !== "v2") this.emitCompactionFinished(compactionId);
   }
 
   async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
@@ -2669,9 +2858,14 @@ export class OpenCodeAgent {
     this.sessionId = null;
     this.resetSessionRuntimeSync();
     this.activeCompactionSignature = "";
+    // 运行时要没了：还在等压缩结果的调用方不能干等到超时。
+    this.compactionInFlight = false;
+    this.warnedMissingContextWindow = false;
+    this.settleCompaction("OpenCode 运行时已重启，压缩被中断");
     this.models = [];
     this.modelsRequest = null;
     this.modelsGeneration += 1;
+    this.activeResponseModel = null;
     this.modelVariants.clear();
     if (childProcess) await this.killProcessTree(childProcess);
     const runtimeConfigPath = this.runtimeConfigPath;
@@ -2950,7 +3144,11 @@ export class OpenCodeAgent {
 
   // step part 的 tokens（input/output/reasoning/cache）随流式输出可能多次更新，
   // 只在差值为正时上报，渲染端按回合累加即为全部调用的总消耗。
-  private emitPartTokenUsageDelta(part: UnknownRecord) {
+  //
+  // `fromCompaction` 标记摘要（压缩）请求自己的用量：它照常计入 Token 统计，
+  // 但上层不能把它当成「当前上下文占用」——摘要请求的输入是压缩前的整段历史，
+  // 拿它刷新上下文圆环会让人误以为压缩没生效。
+  private emitPartTokenUsageDelta(part: UnknownRecord, fromCompaction = false) {
     const partId = typeof part.id === "string" ? part.id : "";
     if (!partId) return;
     const tokens = asRecord(part.tokens);
@@ -2968,6 +3166,9 @@ export class OpenCodeAgent {
     const deltaCacheInput = cacheRead - previous.cacheInput;
     if (deltaInput <= 0 && deltaOutput <= 0) return;
     this.partTokenUsage.set(partId, { input, output, cacheInput: cacheRead });
+    // 1.x 的 part.tokens 同样没有窗口：不补这一份，主进程的压缩控制器
+    // 就没有分母，阈值永远不会被判定为「到达」。
+    const contextWindow = this.resolveContextWindow();
     this.emitEvent({
       type: "token_usage",
       inputTokens: Math.max(0, deltaInput),
@@ -2977,6 +3178,8 @@ export class OpenCodeAgent {
       // 否则通用剩余上下文会随着每个 part 累加而失真。
       contextTokens: input,
       contextPrecision: "official",
+      ...(contextWindow ? { contextWindow } : {}),
+      ...(fromCompaction ? { compaction: true } : {}),
     });
   }
 

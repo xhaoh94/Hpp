@@ -103,7 +103,6 @@ import { QuestionnairePanel } from "./QuestionnairePanel";
 import { useChatScroll } from "./useChatScroll";
 import { resolvePreviousUserTargetIndex } from "./previousUserTarget";
 import { useAgentEvents } from "./useAgentEvents";
-import { useAutoCompaction } from "./useAutoCompaction";
 import { isSupportedImageAttachment, usePendingImages } from "./usePendingImages";
 import {
   preparePendingQuestionContinuation,
@@ -935,12 +934,6 @@ const getContextUsageTone = (ratio?: number) => {
   if (ratio >= 0.7) return "warning";
   return "normal";
 };
-
-// 标题栏的上下文圆环：只显示占比，完整数值在悬浮提示里。
-const CONTEXT_RING_SIZE = 20;
-const CONTEXT_RING_STROKE = 2;
-const CONTEXT_RING_RADIUS = (CONTEXT_RING_SIZE - CONTEXT_RING_STROKE) / 2;
-const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
 
 // 输入框下方状态条里的小环：14px，数字放到环外面。
 const STATUS_RING_SIZE = 14;
@@ -2534,6 +2527,22 @@ export function ChatPanel({
   const activeSessionContextUsage = useChatStore((state) =>
     activeSessionId ? state.contextUsageBySession[activeSessionId] : undefined
   );
+  // 主进程做自动压缩判定要「用量 / 窗口」两个数，而有的后端上报用量时不带窗口。
+  // 界面这边从模型目录已经知道窗口了，同步过去当兜底（后端上报的优先）。
+  const syncedContextWindowRef = useRef("");
+  useEffect(() => {
+    const contextWindow = currentModel?.contextWindow;
+    if (!activeSessionId || !currentModel || !contextWindow) return;
+    const key = [activeSessionId, currentModel.provider, currentModel.id, contextWindow].join(":");
+    if (syncedContextWindowRef.current === key) return;
+    syncedContextWindowRef.current = key;
+    const sync = window.electronAPI.agentSyncContextWindow;
+    if (typeof sync !== "function") return;
+    void sync(activeSessionId, contextWindow, {
+      provider: currentModel.provider,
+      id: currentModel.id,
+    }).catch(() => undefined);
+  }, [activeSessionId, currentModel?.provider, currentModel?.id, currentModel?.contextWindow]);
   const activeSessionSupportsGuidance = supportsGuidance(activeSession?.agentId || activeAgentId);
   const activeSessionSupportsActions = supportsAgentActions(activeSession?.agentId || activeAgentId);
   const openSessions = useMemo(
@@ -2730,8 +2739,6 @@ export function ChatPanel({
   } = usePendingUIResponse(activeSessionId, openSessionIds);
   const activeInteraction = activeConfirmation || activePermissionChoice || activeQuestionnaire;
   const currentSessionRunning = activeSessionId ? activeSessionAgentStatus === "running" : isStreaming;
-  // 智能压缩：用量越过档位、回合结束后自动压缩（档位在上下文弹窗里调）。
-  useAutoCompaction(activeSessionId);
   const permissionModeSupported = supportsPermissionModes(activeSession?.agentId || activeAgentId);
   useEffect(() => {
     if (!permissionModeSupported) setPermissionOpen(false);
@@ -4039,15 +4046,15 @@ export function ChatPanel({
   // 弹窗只需把结果错误反馈出来。按钮对所有 Agent 都开放，能力差异由后端回答。
   const handleCompactContext = async () => {
     if (!activeSessionId) {
-      showFloatingToastMessage("先打开一个会话再压缩上下文。");
+      showFloatingToastMessage("先打开一个会话。");
       return false;
     }
     if (currentSessionRunning) {
-      showFloatingToastMessage("当前回合仍在运行，等结束后再压缩。");
+      showFloatingToastMessage("回合运行中，结束后再压缩。");
       return false;
     }
     if (typeof window.electronAPI.agentCompactSession !== "function") {
-      showFloatingToastMessage("当前版本不支持手动压缩上下文，请重启客户端后重试。");
+      showFloatingToastMessage("当前版本不支持压缩，请重启客户端。");
       return false;
     }
     const result = await window.electronAPI.agentCompactSession(activeSessionId);
@@ -4068,7 +4075,7 @@ export function ChatPanel({
   const contextUsageRatio = contextWindow && contextUsedTokens !== undefined
     ? Math.min(1, contextUsedTokens / contextWindow)
     : undefined;
-  // 标题栏只留一个进度环 + 中心百分比，完整数值放到悬浮提示里。
+  // 状态栏环只在有用量数据时出现：完整数值放悬浮提示里，环旁只留占比。
   const contextPercentLabel = `${Math.round((contextUsageRatio ?? 0) * 100)}`;
   // 百分比太小（不足 0.5%）时取整会显示 0，仍应让环上留出可见进度。
   const contextRingProgress = contextUsageRatio !== undefined
@@ -4404,19 +4411,23 @@ export function ChatPanel({
         />
         </div>
 
-        {/* 空会话没有真实统计，显示固定占位文案；发第一条消息后换成真实统计。 */}
-        {messages.length === 0 ? (
-          <div className="chat-status-bar chat-status-bar-empty"><span>暂无统计数据</span></div>
-        ) : <div className="chat-status-bar">
-          {activeSessionId && <ChatSessionStatsItem sessionId={activeSessionId} />}
-          <span className="chat-status-divider" aria-hidden="true" />
-          {activeSessionId && (
-            <ChatTokenUsageItem
-              sessionId={activeSessionId}
-              itemRef={tokenUsageRef}
-              open={tokenUsageOpen}
-              onOpen={() => setTokenUsageOpen(true)}
-            />
+        {/* 空会话只留占位文案 + 上下文环；统计和生成摘要有消息后才出现。 */}
+        <div className="chat-status-bar">
+          {messages.length === 0 ? (
+            <span className="chat-status-empty-label">暂无统计数据</span>
+          ) : (
+            <>
+              {activeSessionId && <ChatSessionStatsItem sessionId={activeSessionId} />}
+              <span className="chat-status-divider" aria-hidden="true" />
+              {activeSessionId && (
+                <ChatTokenUsageItem
+                  sessionId={activeSessionId}
+                  itemRef={tokenUsageRef}
+                  open={tokenUsageOpen}
+                  onOpen={() => setTokenUsageOpen(true)}
+                />
+              )}
+            </>
           )}
           <span className="chat-status-divider" aria-hidden="true" />
           <button
@@ -4448,20 +4459,27 @@ export function ChatPanel({
                 transform={`rotate(-90 ${STATUS_RING_SIZE / 2} ${STATUS_RING_SIZE / 2})`}
               />
             </svg>
-            <span className="chat-context-ring-value">{contextPercentLabel}%</span>
+            {/* 环是常驻入口；只有拿到用量才补占比文字，没数据就只留一个空环。 */}
+            {contextUsageRatio !== undefined && (
+              <span className="chat-context-ring-value">{contextPercentLabel}%</span>
+            )}
           </button>
-          <span className="chat-status-divider" aria-hidden="true" />
-          <button
-            type="button"
-            className="chat-header-handoff"
-            onClick={() => void copySessionHandoff()}
-            title="生成摘要（换模型或换 Agent 时接续上下文，自动复制）"
-            aria-label="生成摘要"
-          >
-            <ArrowRightLeft size={12} strokeWidth={2} />
-            <span>生成摘要</span>
-          </button>
-        </div>}
+          {messages.length > 0 && (
+            <>
+              <span className="chat-status-divider" aria-hidden="true" />
+              <button
+                type="button"
+                className="chat-header-handoff"
+                onClick={() => void copySessionHandoff()}
+                title="生成摘要（换模型或换 Agent 时接续上下文，自动复制）"
+                aria-label="生成摘要"
+              >
+                <ArrowRightLeft size={12} strokeWidth={2} />
+                <span>生成摘要</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {isForkingSession && (
@@ -4559,6 +4577,9 @@ export function ChatPanel({
       {contextUsageOpen && (
         <ContextUsageModal
           usage={activeSessionContextUsage}
+          fallbackContextWindow={currentModel?.contextWindow}
+          model={currentModel ? { provider: currentModel.provider, id: currentModel.id } : null}
+          sessionId={activeSessionId}
           anchorRef={contextRingRef}
           onClose={() => setContextUsageOpen(false)}
           onCompact={handleCompactContext}
@@ -4566,7 +4587,7 @@ export function ChatPanel({
           compactDisabledReason={!activeSessionId
             ? "先打开一个会话"
             : currentSessionRunning
-              ? "当前回合仍在运行，结束后再压缩"
+              ? "回合运行中，结束后再压缩"
               : undefined}
         />
       )}

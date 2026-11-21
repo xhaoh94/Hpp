@@ -211,6 +211,36 @@ describe("agent event terminal reconciliation", () => {
     harness.controller.clearAllStreamWatchdogs();
   });
 
+  it("ignores the compaction request's own usage for the context ring", () => {
+    const harness = createHarness();
+    dispatchAgentEvent({ type: "context_compaction", id: "sum", phase: "started", sessionId: SESSION_ID }, harness.controller);
+    // 摘要请求的输入是压缩前的整段历史：只算 Token 统计，不能当上下文占用。
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      inputTokens: 190000,
+      outputTokens: 200,
+      contextTokens: 190000,
+      contextWindow: 1000000,
+      contextPrecision: "official",
+      compaction: true,
+    }, harness.controller);
+    dispatchAgentEvent({ type: "context_compaction", id: "sum", phase: "completed", sessionId: SESSION_ID }, harness.controller);
+    // 压缩完成后迟到的 step 用量同样带标记，不能让圆环回到压缩前的大小。
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      inputTokens: 190000,
+      outputTokens: 0,
+      contextTokens: 190000,
+      contextWindow: 1000000,
+      contextPrecision: "official",
+      compaction: true,
+    }, harness.controller);
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toBeUndefined();
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("does not flush a pending stream render for unrelated turn activity", () => {
     vi.useFakeTimers();
     const harness = createHarness();

@@ -43,6 +43,7 @@ vi.mock("./agent-plugin-registry", () => ({
     reload: testState.reloadRegistry,
     shutdown: testState.shutdownRegistry,
     updateAgent: testState.updateAgent,
+    onSessionEvent: vi.fn(() => () => {}),
   }),
 }));
 

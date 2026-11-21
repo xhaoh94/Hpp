@@ -1,0 +1,140 @@
+/* 子任务悬停卡：替代原生 title 里的 markdown 源码，正文按 markdown 渲染。 */
+
+.subagent-hover-card {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  width: min(680px, calc(100vw - 24px));
+  max-height: min(560px, 62vh);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  box-shadow: 0 18px 45px var(--shadow-color);
+  overflow: hidden;
+  pointer-events: auto;
+  animation: subagent-hover-card-in 0.12s ease-out;
+}
+
+.subagent-hover-head {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.subagent-hover-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-hover-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.subagent-hover-status.status-running {
+  border-color: color-mix(in srgb, var(--accent-color) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+  color: var(--accent-color);
+}
+
+.subagent-hover-status.status-completed {
+  border-color: color-mix(in srgb, var(--success-color) 40%, transparent);
+  background: color-mix(in srgb, var(--success-color) 10%, transparent);
+  color: var(--success-color);
+}
+
+.subagent-hover-status.status-error,
+.subagent-hover-status.status-interrupted {
+  border-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  background: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  color: var(--danger-color);
+}
+
+.subagent-hover-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-hover-meta > span + span::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.6;
+}
+
+.subagent-hover-body {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 14px 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.subagent-hover-task {
+  display: -webkit-box;
+  margin: 0 0 8px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.subagent-hover-task-label {
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.subagent-hover-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.subagent-hover-body .md-content {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.subagent-hover-body .md-content > :first-child {
+  margin-top: 0;
+}
+
+.subagent-hover-body .md-content > :last-child {
+  margin-bottom: 0;
+}
+
+@keyframes subagent-hover-card-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}

@@ -2546,8 +2546,21 @@ const handleCommand = async (command) => {
           });
           throw error;
         }
-        // 等真实的 thread/compacted；超时也放行，避免界面一直卡住。
-        await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 180_000))]);
+        // 等真实的 thread/compacted；超时必须如实报失败，不能伪造完成。
+        // 165s 比宿主的 compact 命令超时（180s）更早，保证失败原因来自这里而不是宿主的通用超时。
+        const settleTimeoutMs = 165_000;
+        let settleTimer = null;
+        const settledInTime = await Promise.race([
+          settled.then(() => true),
+          new Promise((resolve) => { settleTimer = setTimeout(() => resolve(false), settleTimeoutMs); }),
+        ]);
+        if (settleTimer) clearTimeout(settleTimer);
+        if (!settledInTime) {
+          manualCompactionSettle = null;
+          const detail = `压缩超时：Codex 未在 ${Math.round(settleTimeoutMs / 1000)} 秒内返回 thread/compacted`;
+          send({ type: "context_compaction", id: compactionId, phase: "failed", detail });
+          throw new Error(detail);
+        }
         send({ type: "context_compaction", id: compactionId, phase: "completed" });
         send({ type: "compacted", id: command.id });
         break;

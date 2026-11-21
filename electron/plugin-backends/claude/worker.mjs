@@ -1353,13 +1353,22 @@ const handleCommand = async (command) => {
           activePromptId = null;
           throw error;
         }
-        await Promise.race([
-          settled,
-          // 兜底：极端情况下 SDK 不发 boundary/result，不能让命令和界面无限挂着。
-          new Promise((resolve) => setTimeout(resolve, 5 * 60 * 1000)),
+        // 兜底：极端情况下 SDK 不发 boundary/result，不能让命令和界面无限挂着。
+        // 必须比宿主的 compact 命令超时（180s）更早，否则宿主先报错、这里再补一条
+        // 「已完成」，界面就会把一次失败的压缩显示成成功。
+        const settleTimeoutMs = 165_000;
+        let settleTimer = null;
+        const settledInTime = await Promise.race([
+          settled.then(() => true),
+          new Promise((resolve) => { settleTimer = setTimeout(() => resolve(false), settleTimeoutMs); }),
         ]);
-        if (manualCompactSettle) {
-          finishManualCompaction("completed");
+        if (settleTimer) clearTimeout(settleTimer);
+        if (!settledInTime) {
+          // 等不到 compact_boundary 就是没压缩：如实报失败，别伪造完成。
+          finishManualCompaction(
+            "failed",
+            `压缩超时：Claude Code 未在 ${Math.round(settleTimeoutMs / 1000)} 秒内返回压缩结果`,
+          );
         }
         if (settledPhase === "failed") {
           throw new Error(settledDetail || "Claude Code 压缩上下文失败");

@@ -119,6 +119,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 空态：没有用量时用一句说明代替破折号，别让界面看起来全是横杠。 */
+.context-usage-summary .context-usage-summary-idle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+}
+
 /* 智能压缩阈值：整条进度条就是拖拽区，右侧同行显示百分比。 */
 .context-threshold-row {
   display: flex;
@@ -163,9 +171,20 @@
   background: var(--accent-color);
 }
 
+/* 模型还没确定时没有保存作用域，拖动没有意义：保持可读但明确不可操作。 */
+.context-threshold-track.is-disabled {
+  cursor: default;
+}
+
+.context-threshold-track.is-disabled .context-threshold-handle {
+  background: var(--text-secondary);
+  opacity: 0.5;
+}
+
 .context-threshold-value {
   flex: none;
-  min-width: 34px;
+  /* 容得下 "100%"（四个字符），避免上限改成 100 后被挤压换行。 */
+  min-width: 38px;
   color: var(--text-primary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;

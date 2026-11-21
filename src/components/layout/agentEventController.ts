@@ -1065,6 +1065,8 @@ export function createAgentEventController({
     eventId?: string,
     phase: "started" | "completed" | "interrupted" | "failed" = "completed",
     postTurn?: boolean,
+    /** 失败原因：透传给分隔条，自动压缩失败时让用户看到后端到底报了什么。 */
+    detail?: string,
   ) => {
     const runtime = getRuntime(currentSessionId);
     const normalizedEventId = phase === "started"
@@ -1125,6 +1127,7 @@ export function createAgentEventController({
         normalizedEventId,
         currentSessionId,
         compactionState,
+        detail,
       );
     }
     rememberSettledCompactionEvent(runtime, normalizedEventId);

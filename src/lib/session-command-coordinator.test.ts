@@ -312,6 +312,59 @@ describe("SessionCommandCoordinator", () => {
       .toEqual(["guide-front-message", "existing-queued", "normal-message"]);
   });
 
+  it("keeps a new guide-front send behind the guidance already waiting to be inserted", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    useChatStore.setState({
+      messageQueues: {
+        "session-one": [
+          {
+            id: "guide-waiting",
+            sessionId: "session-one",
+            displayContent: "先插的话",
+            sendContent: "先插的话",
+            createdAt: 10,
+            status: "sending",
+          },
+          {
+            id: "existing-queued",
+            sessionId: "session-one",
+            displayContent: "普通排队",
+            sendContent: "普通排队",
+            createdAt: 20,
+            status: "queued",
+          },
+        ],
+      },
+    });
+    electronAPI.agentGetSessionState
+      .mockResolvedValueOnce({ success: true, idle: false })
+      .mockResolvedValueOnce({ success: true, idle: false });
+
+    await expect(SessionCommandCoordinator.sendMessage({
+      sessionId: "session-one",
+      clientMessageId: "guide-front-second",
+      message,
+      queueIfRunning: true,
+      queuePosition: "front",
+    })).resolves.toMatchObject({ queued: true });
+
+    // 列表顺序要和实际注入顺序一致：后插的话排在已在等待插入的那条后面，
+    // 而不是无脑顶到队首；普通排队仍排在它后面。
+    expect(useChatStore.getState().messageQueues["session-one"].map((item) => item.id))
+      .toEqual(["guide-waiting", "guide-front-second", "existing-queued"]);
+
+    // 再发一条普通消息：顺手把第二个 agentGetSessionState 的 Once 用掉，
+    // 否则它会漏给后面的用例（clearAllMocks 不清实现队列）。
+    await expect(SessionCommandCoordinator.sendMessage({
+      sessionId: "session-one",
+      clientMessageId: "normal-after-guides",
+      message,
+      queueIfRunning: true,
+    })).resolves.toMatchObject({ queued: true });
+    expect(useChatStore.getState().messageQueues["session-one"].map((item) => item.id))
+      .toEqual(["guide-waiting", "guide-front-second", "existing-queued", "normal-after-guides"]);
+  });
+
   it("queues a send while context compaction is active", async () => {
     useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
     useChatStore.setState({ compactingSessions: { "session-one": true } });

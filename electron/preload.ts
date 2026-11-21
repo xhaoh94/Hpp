@@ -459,10 +459,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:listActions", sessionId, options),
   agentSetModel: (provider: string, modelId: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:setModel", provider, modelId, sessionId),
+  /** 只登记会话当前模型（不切换后端），让主进程能按「渠道 + 模型」解析压缩阈值。 */
+  agentSyncSessionModel: (sessionId: string, provider: string, modelId: string) =>
+    ipcRenderer.invoke("agent:syncSessionModel", sessionId, provider, modelId),
+  /** 同步模型目录里的上下文窗口：后端上报的用量不带窗口时给压缩判定兜底。 */
+  agentSyncContextWindow: (
+    sessionId: string,
+    contextWindow: number,
+    model?: { provider: string; id: string },
+  ) => ipcRenderer.invoke("agent:syncSessionContextWindow", sessionId, contextWindow, model),
   agentSetThinkingLevel: (level: string, sessionId?: string) =>
     ipcRenderer.invoke("agent:setThinkingLevel", level, sessionId),
   agentCompactSession: (sessionId?: string) =>
     ipcRenderer.invoke("agent:compactSession", sessionId),
+  agentSetCompactionThreshold: (
+    percent: number,
+    target?: { sessionId?: string; model?: { provider: string; id: string } },
+  ) => ipcRenderer.invoke("agent:setCompactionThreshold", percent, target),
   agentSendUIResponse: (response: AgentUIResponse) =>
     ipcRenderer.invoke("agent:sendUIResponse", response),
 

@@ -220,7 +220,10 @@ describe("subagent monitor panel layout", () => {
     expect(monitor).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
     expect(monitor).toContain("{selected.title || getSubagentTitle(selected.prompt, selected.label)}");
     expect(block).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
-    expect(block).toContain("subagent.label,\n  getSubagentStatusLabel");
+    expect(block).toContain("subagent.label,\n  formatSubagentStatusLabel(subagent.status, subagent.stopReason),");
+    // 胶囊的原生 title 不再塞 message：长输出是 markdown，交给悬停卡渲染，
+    // 塞回 title 就会退回「一大坨源码」的系统 tooltip。
+    expect(block).not.toContain("subagent.message,\n].filter(Boolean)");
   });
 
   it("closes on outside click without treating panel scroll as outside", () => {

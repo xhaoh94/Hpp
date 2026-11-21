@@ -95,6 +95,15 @@ export function useSessionModels({
               persistedModel.provider !== selectedModel.provider
             ) {
               await SessionCommandCoordinator.setModel(sessionId, selectedModel, { models });
+            } else {
+              // 复用已有后端运行时不会重发 setModel，主进程那边就没有这个会话的模型记录，
+              // 压缩阈值只能退化到缺省值（和界面按「渠道 + 模型」显示的值对不上）。
+              // 这里补一次只登记、不切换的同步。
+              void window.electronAPI.agentSyncSessionModel?.(
+                sessionId,
+                selectedModel.provider,
+                selectedModel.id,
+              ).catch(() => undefined);
             }
           }
           return;

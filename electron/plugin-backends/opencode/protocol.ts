@@ -495,7 +495,10 @@ const translateV2Event = (type: string, data: UnknownRecord): NormalizedOpenCode
       pendingFormFields.delete(String(data.id || ""));
       return { type: "question.rejected", properties: data };
     case "session.compaction.failed":
-      return { type: "session.error", properties: { sessionID, error: data.error } };
+      // 压缩失败不是回合失败：它可能发生在空闲时（手动/自动压缩，或 OpenCode
+      // 自己的兜底）。当成 session.error 会让界面冒一条「OpenCode 错误」，
+      // 而真正该收尾的是那条「压缩中」分隔线。
+      return { type: "session.compacted", properties: { sessionID, error: data.error } };
     default:
       return { type, properties: data };
   }

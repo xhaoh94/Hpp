@@ -50,10 +50,16 @@ describe("chat panel worktree workspace", () => {
     const desktop = readWorkspaceFile("src/components/layout/ChatPanel.tsx");
     const mobile = readWorkspaceFile("mobile/src/App.tsx");
 
-    // 桌面：空会话显示固定文案，非空才渲染真实统计。
+    // 桌面：空会话是「暂无统计数据 | ◯」—— 占位文案在前，环在分支外常驻。
     expect(desktop).toContain('messages.length === 0 ? (');
-    expect(desktop).toContain('className="chat-status-bar chat-status-bar-empty"');
-    expect(desktop).toContain("暂无统计数据");
+    expect(desktop).toContain('className="chat-status-empty-label">暂无统计数据');
+    const emptyLabelIndex = desktop.indexOf('className="chat-status-empty-label"');
+    const contextRingIndex = desktop.indexOf("chat-context-ring ${getContextUsageTone(contextUsageRatio)}");
+    expect(emptyLabelIndex).toBeGreaterThan(-1);
+    expect(contextRingIndex).toBeGreaterThan(emptyLabelIndex);
+    // 有上下文用量才补环旁的占比文字。
+    expect(desktop).toContain("contextUsageRatio !== undefined && (");
+    expect(desktop).toContain('<span className="chat-context-ring-value">{contextPercentLabel}%</span>');
     // 手机：同样口径，selected 存在但无消息时显示占位。
     expect(mobile).toContain("selectedMessages.length === 0");
     expect(mobile).toContain('className="composer-status composer-status-empty"');

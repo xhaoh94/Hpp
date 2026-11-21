@@ -1141,6 +1141,16 @@ function findZipManifest(zip: AdmZip): { entryName: string; prefix: string; mani
   throw new Error(`ZIP 根目录缺少 ${MANIFEST_FILE}。`);
 }
 
+/**
+ * 会话事件观察者签名：拿到的是发给渲染层之前的归一化事件。
+ * 事件里不带 sessionId/agentId，由参数单独给出。
+ */
+export type AgentSessionEventListener = (
+  sessionId: string,
+  agentId: string,
+  event: Record<string, unknown>,
+) => void;
+
 export class AgentPluginRegistry {
   private pluginRecords = new Map<string, PluginRecord>();
   private pluginProcesses = new Map<string, PluginProcessEntry>();
@@ -1160,6 +1170,19 @@ export class AgentPluginRegistry {
   private loadPromise: Promise<AgentDescriptor[]> | null = null;
   private reloadPromise: Promise<AgentDescriptor[]> | null = null;
   private reloading = false;
+  /**
+   * 会话事件旁路观察者。宿主用它做跨 Agent 的上下文压缩判定，
+   * 与发给渲染层的事件是同一份归一化结果。
+   */
+  private sessionEventListeners = new Set<AgentSessionEventListener>();
+
+  /** 注册会话事件观察者，返回取消订阅函数。 */
+  onSessionEvent(listener: AgentSessionEventListener): () => void {
+    this.sessionEventListeners.add(listener);
+    return () => {
+      this.sessionEventListeners.delete(listener);
+    };
+  }
 
   async ensureLoaded() {
     // `loaded` 在重载过程中可能仍为 true（旧目录尚未清空），不能只看它。
@@ -2162,6 +2185,15 @@ export class AgentPluginRegistry {
             activeLifecycleTerminalSeen = false;
             markBackendBusy();
           }
+        }
+      }
+      // 旁路观察者：宿主用它做跨 Agent 的上下文压缩判定，不参与事件转发本身。
+      // 观察者出错不能影响渲染层事件，所以逐个隔离。
+      for (const listener of this.sessionEventListeners) {
+        try {
+          listener(sessionId, record.descriptor.id, normalizedEvent);
+        } catch (error) {
+          console.warn("[agent-plugin-registry] session event listener failed:", error);
         }
       }
       currentWindow?.webContents.send("agent:event", {

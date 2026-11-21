@@ -159,7 +159,9 @@ export function SubagentMonitorView({
               </div>
               {/* 活动固定一行；输出固定一行、点一下展开全文。高度恒定，面板不抖。 */}
               <div className="subagent-monitor-detail-scroll">
-                <div className="subagent-monitor-activity" title={selected.message || undefined}>
+                {/* 这里只放最后一行进展当悬停提示：整段 message 是 markdown，
+                    塞进原生 title 会变成一大坨源码，完整内容看下面的展开输出。 */}
+                <div className="subagent-monitor-activity" title={activityLine}>
                   {activityLine}
                 </div>
                 {selected.liveOutput && (

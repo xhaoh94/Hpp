@@ -9,6 +9,7 @@ import type {
 } from "@/stores/chat-store";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import { ComposerMessageFlow } from "@/components/shared/ComposerMessageFlow";
+import { SubagentHoverCard, useSubagentHoverCard } from "./SubagentHoverCard";
 import { ChevronDown, CornerDownRight, ListTree } from "lucide-react";
 import {
   composerDocumentHasContent,
@@ -24,7 +25,7 @@ import {
   createProcessEntryMerger,
   mergeAdjacentSubagentEntries,
 } from "./processEntryMerge";
-import { formatSubagentModel, formatSubagentUsage } from "./subagentMonitorModel";
+import { formatSubagentModel, formatSubagentStatusLabel, formatSubagentUsage } from "./subagentMonitorModel";
 import { getSubagentSummaryText, getSubagentTitle } from "./processBlockUtils";
 import { getThinkingPreview, getThinkingPreviewMarkdown, isThinkingSingleLine } from "./agentEventUtils";
 import { relativeRemotePath, resolveProjectFilePath } from "@/lib/project-file-path";
@@ -308,17 +309,6 @@ const getSubagentTone = (id: string) => {
   return Math.abs(hash) % 4;
 };
 
-const getSubagentStatusLabel = (status?: AgentSubagent["status"]) => {
-  switch (status) {
-    case "pending": return "等待中";
-    case "running": return "工作中";
-    case "completed": return "已完成";
-    case "error": return "失败";
-    case "interrupted": return "已中断";
-    default: return "";
-  }
-};
-
 function SubagentGlyph() {
   return (
     <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -340,13 +330,16 @@ const openSubagentMonitor = (subagentId: string) => {
   window.dispatchEvent(new CustomEvent(SUBAGENT_MONITOR_OPEN_EVENT, { detail: { subagentId } }));
 };
 
+/**
+ * 胶囊的原生 title 只放身份信息。
+ * 长内容（prompt / message）交给 Markdown 悬停卡 —— 塞进 title 只会变成一大坨源码。
+ */
 const getSubagentTooltip = (subagent: AgentSubagent) => [
   subagent.label,
-  getSubagentStatusLabel(subagent.status),
+  formatSubagentStatusLabel(subagent.status, subagent.stopReason),
   subagent.model,
   formatSubagentUsage(subagent.usage),
   subagent.path,
-  subagent.message,
 ].filter(Boolean).join(" · ");
 
 /**
@@ -376,6 +369,16 @@ function SubagentEntryRow({
   const elapsed = typeof entry.startedAt === "number"
     ? `运行时间 ${formatProcessDuration((entry.completedAt ?? now) - entry.startedAt)}`
     : "";
+  // 悬停卡：原生 title 只能显示纯文本，长输出里的 markdown 会整段摊成源码。
+  const hoverCard = useSubagentHoverCard();
+  const hoveredSubagent = hoverCard.active
+    ? subagents.find((subagent) => subagent.id === hoverCard.active?.subagentId)
+    : undefined;
+  const openHoverCard = (subagent: AgentSubagent, anchor: HTMLElement) => {
+    // 只有占位信息（没任务说明、没输出）的胶囊不弹空卡，免得比原生 title 还贫。
+    if (!subagent.prompt?.trim() && !subagent.message?.trim() && !subagent.liveOutput?.trim()) return;
+    hoverCard.open(subagent.id, anchor);
+  };
   // 一次只展开一个：点哪个子任务就只看哪个，再点一次收起。
   // 两级展开：点胶囊先看任务摘要，摘要卡里再点「查看详细流程」才铺开完整输出。
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -383,12 +386,14 @@ function SubagentEntryRow({
   const expanded = expandedId ? subagents.find((subagent) => subagent.id === expandedId) : undefined;
   const expandedUsage = formatSubagentUsage(expanded?.usage);
   const expandedText = expanded?.message?.trim() || "";
-  // 胶囊/面板用极简标题；一级展开多给一句上下文，完整说明走 title 悬停、细节在二级。
+  // 胶囊/面板用极简标题；一级展开多给一句上下文，完整说明走悬停卡、细节在二级。
   const fullPrompt = expanded?.prompt?.trim() || "";
   const summaryText = getSubagentSummaryText(fullPrompt, expandedText);
 
   const selectSubagent = (id: string, canExpand: boolean, anchor: HTMLElement | null) => {
     if (!canExpand) return;
+    // 点了胶囊就把悬停卡收掉：两级展开已经接管这块内容，两张脸同时挂着很吵。
+    hoverCard.close();
     // 和展开思考一样锁住锚点，避免内容变高后虚拟列表把视口推到底部。
     onPreserveScroll(() => {
       if (expandedId === id) {
@@ -417,10 +422,15 @@ function SubagentEntryRow({
                 key={subagent.id}
                 title={getSubagentTooltip(subagent) || subagent.label}
                 aria-expanded={monitorable ? undefined : open}
+                onMouseEnter={(event) => openHoverCard(subagent, event.currentTarget)}
+                onMouseLeave={hoverCard.scheduleClose}
                 // 运行中的子任务有实时输出，点开监视窗；已结束的点开只看它自己那一份。
                 onClick={
                   monitorable
-                    ? () => openSubagentMonitor(subagent.id)
+                    ? () => {
+                      hoverCard.close();
+                      openSubagentMonitor(subagent.id);
+                    }
                     : (event) => selectSubagent(subagent.id, expandable, event.currentTarget)
                 }
                 disabled={!monitorable && !expandable}
@@ -444,7 +454,7 @@ function SubagentEntryRow({
           <div className="chat-subagent-summary">
             <div className="chat-subagent-summary-head">
               <span className={`chat-subagent-status status-${expanded?.status || "unknown"}`}>
-                {getSubagentStatusLabel(expanded?.status) || expanded?.label}
+                {formatSubagentStatusLabel(expanded?.status, expanded?.stopReason) || expanded?.label}
               </span>
               <span className="chat-subagent-usage-meta">
                 {expanded?.model && <span className="chat-subagent-model" title={`运行模型：${expanded.model}`}>{formatSubagentModel(expanded.model)}</span>}
@@ -477,6 +487,16 @@ function SubagentEntryRow({
             </div>
           )}
         </div>
+      )}
+      {hoveredSubagent && hoverCard.active && (
+        <SubagentHoverCard
+          subagent={hoveredSubagent}
+          anchorRect={hoverCard.active.anchorRect}
+          projectPath={projectPath}
+          now={now}
+          onPointerEnter={hoverCard.cancelClose}
+          onPointerLeave={hoverCard.scheduleClose}
+        />
       )}
     </div>
   );

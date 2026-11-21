@@ -64,6 +64,7 @@ export type AgentEventRuntimeController = AgentEventHandlerContext & {
     eventId?: string,
     phase?: "started" | "completed" | "interrupted" | "failed",
     postTurn?: boolean,
+    detail?: string,
   ) => void;
   clearAllStreamWatchdogs: () => void;
 };

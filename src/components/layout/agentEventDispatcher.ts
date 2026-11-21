@@ -536,7 +536,10 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
         const resolvedWindow = Number.isFinite(contextWindow) && contextWindow > 0
           ? contextWindow
           : usageModel?.contextWindow;
-        if (usedTokens > 0 || resolvedWindow) {
+        // 压缩（摘要）请求自己的用量：照常计入上面的 Token 统计，
+        // 但它的输入是压缩前的整段历史，不能当成压缩后的上下文占用，
+        // 否则圆环会停在压缩前的大小，看起来像「压缩没生效」。
+        if (event.compaction !== true && (usedTokens > 0 || resolvedWindow)) {
           const nextUsage = {
             contextWindow: resolvedWindow,
             usedTokens: usedTokens > 0 ? usedTokens : undefined,
@@ -598,6 +601,17 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
           ? event.phase
           : "completed",
         typeof event.postTurn === "boolean" ? event.postTurn : undefined,
+      );
+      break;
+    case "auto_compaction_failed":
+      // 自动压缩是静默发生的：失败必须留一条可见记录，否则用户只会看到
+      // 上下文一直涨，却不知道为什么没压。
+      appendContextCompactionDivider(
+        currentSessionId,
+        undefined,
+        "failed",
+        undefined,
+        typeof event.message === "string" ? event.message.trim().slice(0, 240) : undefined,
       );
       break;
     case "turn_metadata":

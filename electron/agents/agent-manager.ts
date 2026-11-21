@@ -1,7 +1,8 @@
 import { ipcMain, BrowserWindow, dialog, app, type OpenDialogOptions, type SaveDialogOptions } from "electron";
-import { readFile, rm, writeFile } from "fs/promises";
+import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
+import { ContextCompactionController } from "./context-compaction-controller";
 import {
   downloadOfficialPluginZip,
   listOfficialAgentPlugins,
@@ -45,6 +46,7 @@ import {
 } from "./mcp-config";
 import { readCodemodeConfig, writeCodemodeConfig } from "./codemode-config";
 import { logTiming } from "../utils/timing-log";
+import { queueNamedWrite } from "../utils/write-queue";
 import { isValidAgentConfigExport } from "../../shared/agent-config-io";
 import { combineAgentModels } from "./agent-model-list";
 import { agentRuntimeOperationQueue } from "./agent-runtime-operation-queue";
@@ -57,6 +59,14 @@ import {
   resolveStoredAgentCompactionConfig,
   type AgentCompactionConfig,
 } from "../../shared/agent-compaction";
+import {
+  CONTEXT_COMPACTION_THRESHOLDS_KEY,
+  contextCompactionThresholdKey,
+  normalizeContextCompactionThreshold,
+  normalizeContextCompactionThresholdMap,
+  resolveContextCompactionThreshold,
+  type ContextCompactionThresholdModel,
+} from "../../shared/context-compaction-threshold";
 import {
   normalizeAgentSubagentConfig,
   type AgentSubagentConfig,
@@ -163,6 +173,23 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+/**
+ * 等后端真正空闲。
+ *
+ * 渲染层认为回合结束（收到 agent_end / 界面不再转圈）和后端 `isIdle()`
+ * 变成 true 之间常常差一个收尾去抖：OpenCode 的空闲收尾要去读 diff、
+ * 数一数还有没有在跑的工具。手动压缩点在这个窗口里就会被一句
+ * 「当前回合仍在运行」顶回去，看起来像按钮坏了。
+ */
+async function waitForAgentIdle(agent: AgentBackend, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (agent.isIdle()) return true;
+  }
+  return agent.isIdle();
+}
+
 function normalizeCompactionForSupport(
   value: unknown,
   support: AgentCompactionSupport | undefined,
@@ -224,6 +251,83 @@ async function loadSavedAgentCompactionConfig(agentId: string): Promise<AgentCom
   }
 }
 
+/**
+ * 智能压缩阈值（%）。这是渲染层「上下文用量」弹窗里的设置。
+ *
+ * 按「渠道 + 模型」分别保存（`contextCompactionThresholds` 映射），
+ * 旧版的全局 `contextCompactionThreshold` 只作为没有单独配置时的兜底。
+ */
+interface SavedCompactionThresholds {
+  thresholds: Record<string, number>;
+  legacyDefault?: number;
+}
+
+async function loadSavedCompactionThresholds(): Promise<SavedCompactionThresholds> {
+  try {
+    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
+    const settingsPath = join(dataDir, "settings.json");
+    const settings = JSON.parse((await readFile(settingsPath, "utf8")).replace(/^\uFEFF/, "")) as {
+      general?: {
+        contextCompactionThresholds?: unknown;
+        contextCompactionThreshold?: unknown;
+        contextCompactionTiers?: unknown;
+      };
+    };
+    const general = settings.general;
+    const legacyTiers = general?.contextCompactionTiers;
+    return {
+      thresholds: normalizeContextCompactionThresholdMap(general?.contextCompactionThresholds),
+      legacyDefault: general?.contextCompactionThreshold !== undefined
+        ? general.contextCompactionThreshold
+        : Array.isArray(legacyTiers) && legacyTiers.length > 0
+          ? legacyTiers[0]
+          : undefined,
+    };
+  } catch {
+    return { thresholds: {} };
+  }
+}
+
+/**
+ * 原子写入某个「渠道 + 模型」的阈值。
+ *
+ * 与其它设置共用 `settings` 写队列。渲染层原来自己 loadData → 改 → saveData，
+ * 两个并发写会互相覆盖（拖阈值的同时改别的设置就可能丢字段）；改由主进程
+ * 统一读改写后，渲染层只发一条命令。
+ */
+async function persistCompactionThreshold(key: string, percent: number): Promise<void> {
+  await queueNamedWrite("settings", async () => {
+    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
+    const settingsPath = join(dataDir, "settings.json");
+    let settings: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse((await readFile(settingsPath, "utf8")).replace(/^\uFEFF/, ""));
+      if (isRecord(parsed)) settings = parsed;
+    } catch {
+      settings = {};
+    }
+    const general = isRecord(settings.general) ? settings.general : {};
+    const thresholds = normalizeContextCompactionThresholdMap(general[CONTEXT_COMPACTION_THRESHOLDS_KEY]);
+    thresholds[key] = percent;
+    settings.general = { ...general, [CONTEXT_COMPACTION_THRESHOLDS_KEY]: thresholds };
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  });
+}
+
+/** 从事件或 IPC 参数里读 `{ provider, id }`；缺一项就当没有作用域。 */
+function readContextCompactionModel(value: unknown): ContextCompactionThresholdModel | undefined {
+  if (!isRecord(value)) return undefined;
+  const provider = typeof value.provider === "string" ? value.provider.trim() : "";
+  const id = typeof value.id === "string"
+    ? value.id.trim()
+    : typeof value.modelId === "string"
+      ? value.modelId.trim()
+      : "";
+  if (!provider || !id) return undefined;
+  return { provider, id };
+}
+
 // ============================================================
 // Agent Manager - manages plugin backends per session.
 // ============================================================
@@ -244,6 +348,34 @@ export class AgentManager {
   private lifecycleGeneration = 0;
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
+  private compactionThresholdLoad: Promise<void> | null = null;
+  private compactionThresholdExplicitlySet = false;
+  /** 按「渠道 + 模型」保存的阈值，settings 映射的进程内副本。 */
+  private compactionThresholds: Record<string, number> = {};
+  /**
+   * 本次运行中由界面显式写过的键：惰性读盘的结果不能把这些值覆盖掉
+   * （拖动往往发生在读盘尚未落地的那几毫秒里）。
+   */
+  private compactionThresholdOverrides = new Set<string>();
+  /** 旧版全局阈值：只在该模型没有单独配置时兜底，保证升级后行为连续。 */
+  private legacyCompactionThreshold: unknown;
+  /** 每个会话当前的模型，用来把阈值解析到「渠道 + 模型」这一级。 */
+  private sessionModels = new Map<string, ContextCompactionThresholdModel>();
+  /**
+   * 跨 Agent 的智能压缩触发器。用量到了阈值、回合结束就调后端已有的 compact()，
+   * 所以不需要给各家 CLI 写自动压缩配置，也不用重开会话。
+   */
+  private readonly compactionController = new ContextCompactionController({
+    getBackend: (sessionId) => this.sessionAgents.get(sessionId),
+    onError: (sessionId, message) => {
+      console.warn(`[agent-manager] ${sessionId}: ${message}`);
+      this.window?.webContents.send("agent:event", {
+        type: "auto_compaction_failed",
+        sessionId,
+        message,
+      });
+    },
+  });
 
   setWindow(win: BrowserWindow) { this.window = win; }
 
@@ -307,6 +439,8 @@ export class AgentManager {
         const compaction = savedCompaction
           ? normalizeCompactionForSupport(savedCompaction, compactionSupport)
           : undefined;
+        // 智能压缩阈值不再下发给后端：触发统一由主进程的压缩控制器判定，
+        // 各家 CLI 的自动压缩配置保持原样（只作为 100% 时的极限兜底）。
         const subagent = capabilities.subagent && capabilities.subagent !== "none"
           ? await loadSavedAgentSubagentConfig(agentId)
           : undefined;
@@ -344,6 +478,8 @@ export class AgentManager {
     sessionId: string, agentId: string, projectPath: string,
     existingSessionFilePath?: string
   ): Promise<void> {
+    // 阈值加载是旁路，不阻塞建会话。
+    void this.ensureCompactionThresholdLoaded();
     if (this.pluginCatalogMutating) {
       throw new Error("Agent 插件正在安装或刷新，请等待操作完成。");
     }
@@ -511,6 +647,10 @@ export class AgentManager {
     return this.activeSessionId ? this.sessionAgentTypes.get(this.activeSessionId) : undefined;
   }
 
+  getActiveSessionId(): string | null {
+    return this.activeSessionId;
+  }
+
   canReloadConfig(agentId: string, sessionId?: string): AgentReloadConfigResult {
     const entries = Array.from(this.sessionAgents.entries());
     const targetEntries = sessionId
@@ -605,6 +745,159 @@ export class AgentManager {
       typeof agent.setCompactionConfig === "function"
     );
     return this.applyBackendConfigToSessions(supportedSessions, (agent) => agent.setCompactionConfig!(config));
+  }
+
+  /**
+   * 把智能压缩阈值（%）热更新到压缩控制器。
+   *
+   * 阈值按「渠道 + 模型」保存：带 model 时只影响使用该模型的会话；
+   * 不带 model 的旧调用退回缺省阈值（兼容老渲染层）。
+   * 刻意不下发给各后端——触发统一由 Hpp 自己判定，各家配置保持原样。
+   */
+  async setCompactionThreshold(
+    percent: unknown,
+    target?: { sessionId?: string; model?: { provider?: unknown; id?: unknown } },
+  ): Promise<{ success: boolean; error?: string; appliedSessionIds: string[] }> {
+    const normalized = normalizeContextCompactionThreshold(percent);
+    const sessionId = typeof target?.sessionId === "string" ? target.sessionId.trim() : "";
+    const model = readContextCompactionModel(target?.model);
+
+    if (model) {
+      const key = contextCompactionThresholdKey(model)!;
+      if (sessionId) this.sessionModels.set(sessionId, model);
+      this.compactionThresholds[key] = normalized;
+      this.compactionThresholdOverrides.add(key);
+      // 落盘放在主进程：读改写整份 settings 必须和其它设置走同一条队列。
+      try {
+        await persistCompactionThreshold(key, normalized);
+      } catch (error: unknown) {
+        // 落盘失败不影响本次触发点（内存已更新），下次拖动会再写一次。
+        console.warn(`[agent-manager] 保存压缩阈值失败：${getErrorMessage(error)}`);
+      }
+      const appliedSessionIds: string[] = [];
+      // 同一渠道 + 模型可能开着多个会话：它们应该一起切换阈值。
+      for (const [sid, current] of this.sessionModels.entries()) {
+        if (current.provider !== model.provider || current.id !== model.id) continue;
+        this.compactionController.setSessionThreshold(sid, normalized);
+        appliedSessionIds.push(sid);
+      }
+      return { success: true, appliedSessionIds };
+    }
+
+    if (sessionId) {
+      this.compactionController.setSessionThreshold(sessionId, normalized);
+      return { success: true, appliedSessionIds: [sessionId] };
+    }
+
+    // 没有作用域的旧调用：当作缺省阈值，只影响没有模型级配置的会话。
+    this.compactionThresholdExplicitlySet = true;
+    this.compactionController.setThreshold(normalized);
+    return { success: true, appliedSessionIds: [] };
+  }
+
+  /**
+   * 旁路接收会话事件，交给压缩控制器判定。
+   * 模型切换后阈值要跟着换：事件自带 `model: { provider, id }`，
+   * 四家后端（pi / claude / codex / opencode）都按这个口径上报。
+   */
+  observeSessionEvent(sessionId: string, event: Record<string, unknown>): void {
+    this.compactionController.observeEvent(sessionId, event);
+    // 控制器在 model_changed / agent_init 时会清掉旧状态（含会话阈值），
+    // 这里按已知模型重新解析一次，避免退回缺省阈值误触发。
+    if (event.type === "model_changed") {
+      const model = readContextCompactionModel(event.model);
+      // 先让控制器处理 model_changed（它会清掉旧状态），再按新模型设置阈值。
+      if (model) this.applySessionModel(sessionId, model);
+      return;
+    }
+    if (event.type === "agent_init") {
+      const model = this.sessionModels.get(sessionId);
+      if (model) this.applySessionModel(sessionId, model);
+    }
+  }
+
+  /** 记录会话使用的模型（setModel 调用点用），并按该模型刷新阈值。 */
+  rememberSessionModel(sessionId: string | null | undefined, provider: string, modelId: string): void {
+    const id = typeof sessionId === "string" ? sessionId.trim() : "";
+    if (!id) return;
+    const model = readContextCompactionModel({ provider, id: modelId });
+    if (model) this.applySessionModel(id, model);
+  }
+
+  /**
+   * 记录会话的上下文窗口（渲染层从模型目录拿到的那份），给压缩判定当兜底。
+   *
+   * 有的后端上报的用量事件不带窗口（老版本 OpenCode、部分第三方插件），
+   * 没有窗口就算不出比例，阈值会静默失效。后端自己上报的窗口优先。
+   * 带 model 时若与会话已知模型不一致就丢弃：切模型的瞬间渲染层可能还在
+   * 用上一份目录，那个窗口不能写进新模型的作用域。
+   */
+  setSessionContextWindow(
+    sessionId: string | null | undefined,
+    contextWindow: unknown,
+    model?: unknown,
+  ): { success: boolean } {
+    const id = typeof sessionId === "string" ? sessionId.trim() : "";
+    if (!id) return { success: false };
+    const scoped = readContextCompactionModel(model);
+    if (scoped) {
+      const current = this.sessionModels.get(id);
+      if (current && (current.provider !== scoped.provider || current.id !== scoped.id)) {
+        return { success: false };
+      }
+      // 窗口和模型来自同一份目录：没登记过模型时顺手补上，
+      // 否则阈值只能退化到缺省值。
+      if (!current) this.applySessionModel(id, scoped);
+    }
+    this.compactionController.setSessionContextWindow(id, contextWindow);
+    return { success: true };
+  }
+
+  private applySessionModel(sessionId: string, model: ContextCompactionThresholdModel): void {
+    this.sessionModels.set(sessionId, model);
+    this.compactionController.setSessionThreshold(
+      sessionId,
+      resolveContextCompactionThreshold(
+        this.compactionThresholds,
+        model,
+        this.legacyCompactionThreshold,
+      ),
+    );
+    // 首次收到模型时再把 settings 读进来；读到后会对已知会话重算一遍。
+    void this.ensureCompactionThresholdLoaded();
+  }
+
+  /**
+   * 惰性加载已保存的阈值：settings.json 要走 app.getPath，
+   * 不能在模块加载阶段（app ready 之前）读。不阻塞建会话——
+   * 读盘通常只需几毫秒，期间按默认值判定即可；用户已显式设置过则不覆盖。
+   */
+  private ensureCompactionThresholdLoaded(): Promise<void> {
+    if (!this.compactionThresholdLoad) {
+      this.compactionThresholdLoad = loadSavedCompactionThresholds()
+        .then((saved) => {
+          // 读盘期间界面可能已经拖过一个值：那些键以内存为准，不能被旧盘覆盖。
+          const merged: Record<string, number> = { ...saved.thresholds };
+          for (const key of this.compactionThresholdOverrides) {
+            const current = this.compactionThresholds[key];
+            if (typeof current === "number") merged[key] = current;
+          }
+          this.compactionThresholds = merged;
+          this.legacyCompactionThreshold = saved.legacyDefault;
+          // 读盘期间可能已经有会话拿着默认阈值在跑：按刚读到的配置重算一次。
+          for (const [sessionId, model] of this.sessionModels.entries()) {
+            this.compactionController.setSessionThreshold(
+              sessionId,
+              resolveContextCompactionThreshold(merged, model, saved.legacyDefault),
+            );
+          }
+          if (!this.compactionThresholdExplicitlySet && saved.legacyDefault !== undefined) {
+            this.compactionController.setThreshold(saved.legacyDefault);
+          }
+        })
+        .catch(() => undefined);
+    }
+    return this.compactionThresholdLoad;
   }
 
   async setAgentCompactionConfig(
@@ -1136,6 +1429,8 @@ export class AgentManager {
       }
     } finally {
       clearPendingUIEvents(sessionId);
+      this.compactionController.forget(sessionId);
+      this.sessionModels.delete(sessionId);
       this.sessionAgents.delete(sessionId);
       this.sessionAgentTypes.delete(sessionId);
       this.sessionFilePaths.delete(sessionId);
@@ -1165,12 +1460,22 @@ export class AgentManager {
     this.disposingSessionIds.clear();
     this.pluginCatalogMutating = false;
     this.activeSessionId = null;
+    // 运行时重载（插件热更新）会复用同一批 sessionId：闩锁与模型映射必须一起作废，
+    // 否则新后端会继承旧会话的「已到达阈值」和阈值作用域。
+    this.compactionController.reset();
+    this.sessionModels.clear();
     clearAllPendingUIEvents();
     await Promise.allSettled(agents.map((agent) => Promise.resolve().then(() => agent.dispose())));
   }
 }
 
 const agentManager = new AgentManager();
+
+// 智能压缩：旁路观察所有会话事件，阈值在首次建会话时惰性加载，
+// 之后由设置里的拖动（agent:setCompactionThreshold）热更新。
+agentRegistry.onSessionEvent((sessionId, _agentId, event) => {
+  agentManager.observeSessionEvent(sessionId, event);
+});
 
 async function activateProviderAndReload(agentId: string, providerId: string) {
   const idleCheck = agentManager.canReloadConfig(agentId);
@@ -1658,6 +1963,23 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     }
   });
 
+  ipcMain.handle("agent:setCompactionThreshold", async (
+    _event,
+    percent: unknown,
+    target?: { sessionId?: unknown; model?: unknown },
+  ) => {
+    try {
+      return await agentManager.setCompactionThreshold(percent, {
+        ...(typeof target?.sessionId === "string" ? { sessionId: target.sessionId } : {}),
+        ...(isRecord(target?.model)
+          ? { model: target.model as { provider?: unknown; id?: unknown } }
+          : {}),
+      });
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err), appliedSessionIds: [] };
+    }
+  });
+
   ipcMain.handle("agent:setAgentSubagentConfig", async (_event, agentId: string, config: unknown) => {
     try {
       return await agentManager.setAgentSubagentConfig(agentId, config);
@@ -2121,7 +2443,44 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         AGENT_MODEL_SWITCH_TIMEOUT_MS,
         "切换模型超时，插件未响应，请重试。",
       );
+      // 压缩阈值按「渠道 + 模型」解析：确认切换成功后立刻换到新模型的阈值。
+      agentManager.rememberSessionModel(sessionId ?? agentManager.getActiveSessionId(), provider, modelId);
       return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
+  });
+
+  /**
+   * 只登记「这个会话在用哪个模型」，不切换后端模型。
+   *
+   * 会话复用已有后端运行时（createdRuntime === false）时渲染层不会重发 setModel，
+   * 主进程就拿不到模型 —— 阈值只能退化成缺省值，和界面按「渠道 + 模型」显示的
+   * 值对不上。这个入口专门补这次登记。
+   */
+  ipcMain.handle("agent:syncSessionModel", (_event, sessionId: string, provider: string, modelId: string) => {
+    try {
+      agentManager.rememberSessionModel(sessionId, provider, modelId);
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
+    }
+  });
+
+  /**
+   * 同步模型目录里的上下文窗口。
+   *
+   * 压缩判定要「用量 / 窗口」两个数，而有的后端上报用量时不带窗口，
+   * 界面却已经从模型目录拿到了。这个入口只补窗口，不改变任何阈值。
+   */
+  ipcMain.handle("agent:syncSessionContextWindow", (
+    _event,
+    sessionId: string,
+    contextWindow: unknown,
+    model?: unknown,
+  ) => {
+    try {
+      return agentManager.setSessionContextWindow(sessionId, contextWindow, model);
     } catch (err: unknown) {
       return { success: false, error: getErrorMessage(err) };
     }
@@ -2148,7 +2507,12 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (typeof agent.compact !== "function") {
       return { success: false, error: "当前 Agent 不支持手动压缩上下文。" };
     }
-    if (!agent.isIdle()) return { success: false, error: "当前回合仍在运行，请等待完成后再压缩。" };
+    // 界面上的「回合已结束」和后端真正的 idle 之间可能差一个收尾去抖
+    // （OpenCode 的 idle settlement、diff 回读等）。直接判「仍在运行」会让
+    // 用户点了压缩却只看到一句报错，像是功能坏了 —— 先等一小会儿。
+    if (!agent.isIdle() && !(await waitForAgentIdle(agent, 2000))) {
+      return { success: false, error: "当前回合仍在运行，请等待完成后再压缩。" };
+    }
     try {
       await withTimeout(
         agent.compact(),
