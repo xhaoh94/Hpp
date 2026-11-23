@@ -494,6 +494,7 @@ export interface ElectronAPI {
   gitLog: (target: string, limit?: number) => Promise<GitLogResult>;
   gitBlame: (target: string, path: string) => Promise<GitBlameResult>;
   gitIgnorePath: (target: string, path: string) => Promise<GitActionResult>;
+  gitUntrackPath: (target: string, path: string) => Promise<GitActionResult>;
   gitFileHistory: (target: string, path: string, limit?: number) => Promise<GitLogResult>;
   gitShowCommit: (target: string, hash: string) => Promise<GitCommitDiffResult>;
   gitFetch: (target: string) => Promise<GitActionResult>;

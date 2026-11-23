@@ -1,5 +1,5 @@
 import { createPortal } from "react-dom";
-import { Archive, ArrowDown, ArrowUp, Clipboard, ExternalLink, FolderOpen, History, Undo2 } from "lucide-react";
+import { Archive, ArrowDown, ArrowUp, Clipboard, ExternalLink, FileMinus, FolderOpen, History, Undo2 } from "lucide-react";
 
 import type { FileEntry } from "@/types";
 import { useMenuDismiss } from "./useMenuDismiss";
@@ -21,6 +21,8 @@ interface Props {
   /** 只有变更列表的行会传：储藏这个文件。 */
   onStash?: () => void;
   onIgnore: () => void;
+  /** 已被跟踪的路径：git rm --cached 后再忽略（写 .gitignore 才对它生效）。 */
+  onUntrack: () => void;
   onHistory: () => void;
   onDiscard: () => void;
   onBlame: () => void;
@@ -36,7 +38,7 @@ interface Props {
  */
 export function GitTreeMenu({
   entry, relativePath, x, y, variant, hasChanges, stagedView, busy,
-  onStage, onUnstage, onStash, onIgnore, onHistory, onDiscard, onBlame, onCopyPath, onReveal, onOpen, onClose,
+  onStage, onUnstage, onStash, onIgnore, onUntrack, onHistory, onDiscard, onBlame, onCopyPath, onReveal, onOpen, onClose,
 }: Props) {
   useMenuDismiss(true, onClose, ".git-context-menu");
 
@@ -52,6 +54,10 @@ export function GitTreeMenu({
       <button type="button" role="menuitem" disabled={busy} onClick={run(onIgnore)}>
         <Undo2 size={14} />{isFolder ? "忽略此目录" : "忽略此文件"}
       </button>
+      {/* 已跟踪的路径只写 .gitignore 不生效：必须先移出版本库，所以单独给一个动作。 */}
+      <button type="button" role="menuitem" className="danger" disabled={busy} onClick={run(onUntrack)}>
+        <FileMinus size={14} />{isFolder ? "从版本库移除此目录…" : "从版本库移除此文件…"}
+      </button>
       <button type="button" role="menuitem" disabled={busy} onClick={run(onHistory)}>
         <History size={14} />查看历史
       </button>
@@ -62,7 +68,7 @@ export function GitTreeMenu({
     <div
       className="git-context-menu git-tree-menu"
       role="menu"
-      style={{ left: Math.min(x, window.innerWidth - 240), top: Math.min(y, window.innerHeight - 260) }}
+      style={{ left: Math.min(x, window.innerWidth - 240), top: Math.min(y, window.innerHeight - 320) }}
       onContextMenu={(event) => event.preventDefault()}
       title={relativePath}
     >

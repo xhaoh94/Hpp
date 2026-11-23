@@ -814,6 +814,44 @@ describe("GitService", { timeout: 20_000 }, () => {
     expect(again.error).toContain("已存在");
     expect((await service.clone("--upload-pack=evil", parent, "x")).success).toBe(false);
   });
+
+  it("untracks a committed folder without touching the working tree, then ignores it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hpp-git-untrack-"));
+    temps.push(root);
+    createRepo(root);
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "a.md"), "a\n", "utf8");
+    git(root, ["add", "."]);
+    git(root, ["commit", "-m", "add docs"]);
+
+    // 已经跟踪时，直接写忽略必须被拒绝（否则用户会以为已经生效）
+    const denied = await service.ignorePath(root, "docs");
+    expect(denied.success).toBe(false);
+    expect(denied.error).toContain("已经被 Git 跟踪");
+
+    const removed = await service.untrackPath(root, "docs");
+    expect(removed.success).toBe(true);
+    expect(removed.output).toContain("本地文件保留");
+    // 文件还在磁盘上，索引里没了，删除进入待提交
+    expect(existsSync(join(root, "docs", "a.md"))).toBe(true);
+    expect(git(root, ["ls-files", "--", "docs"])).toBe("");
+    expect(git(root, ["status", "--short"])).toContain("D  docs/a.md");
+
+    // 移除之后忽略才生效
+    const ignored = await service.ignorePath(root, "docs");
+    expect(ignored.success).toBe(true);
+    expect(readFileSync(join(root, ".gitignore"), "utf8")).toContain("docs");
+  });
+
+  it("refuses to untrack a path Git is not tracking", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hpp-git-untrack-skip-"));
+    temps.push(root);
+    createRepo(root);
+
+    const result = await service.untrackPath(root, "missing.md");
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("没有被 Git 跟踪");
+  });
 });
 
 describe("repoNameFromCloneUrl", () => {

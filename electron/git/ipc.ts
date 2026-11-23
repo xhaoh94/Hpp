@@ -60,6 +60,8 @@ export function registerGitIpc() {
     gitService.blame(requireTarget(target), path));
   ipcMain.handle("git:ignorePath", (_event, target: unknown, path: unknown) =>
     gitService.ignorePath(requireTarget(target), path));
+  ipcMain.handle("git:untrackPath", (_event, target: unknown, path: unknown) =>
+    gitService.untrackPath(requireTarget(target), path));
   ipcMain.handle("git:fileHistory", (_event, target: unknown, path: unknown, limit: unknown) =>
     gitService.fileHistory(requireTarget(target), path, limit));
   ipcMain.handle("git:showCommit", (_event, target: unknown, hash: unknown) =>

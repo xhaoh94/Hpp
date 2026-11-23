@@ -1155,6 +1155,39 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
     onChanged?.();
   };
 
+  /**
+   * 已跟踪的路径：先 `git rm --cached` 从版本库移除，再写进 .gitignore。
+   *
+   * 顺序不能反 —— .gitignore 只对未跟踪的路径生效；移除后 ls-files 查不到它，
+   * 忽略才会真的起作用。本地文件始终保留，删除本身进入「待提交」，提交后才生效。
+   */
+  const untrackTreePath = async (relativePath: string) => {
+    const confirmed = await showAppConfirm(
+      `把「${relativePath}」从版本库移除并加入忽略？\n\n`
+        + "本地文件会保留；「删除」会进入待提交，提交后才从版本库消失。",
+      { title: "从版本库移除", confirmLabel: "移除并忽略" },
+    );
+    if (!confirmed) return;
+    setBusy("untrack");
+    setError("");
+    const removed = await window.electronAPI.gitUntrackPath(target.path, relativePath);
+    if (!removed.success) {
+      setBusy("");
+      setError(removed.error || "从版本库移除失败。");
+      return;
+    }
+    const ignored = await window.electronAPI.gitIgnorePath(target.path, relativePath);
+    setBusy("");
+    if (!ignored.success) {
+      // 移除已经生效（删除已进待提交），不能整体报失败，如实说明哪一半没成。
+      setError(`已从版本库移除，但写 .gitignore 失败：${ignored.error || "未知原因"}`);
+    } else {
+      showFloatingToastMessage(`已移除并忽略 ${relativePath}，提交后生效`);
+    }
+    await loadStatus(selectedKey);
+    onChanged?.();
+  };
+
   const copyTreePath = async (relativePath: string) => {
     try {
       await navigator.clipboard.writeText(relativePath);
@@ -1898,6 +1931,7 @@ function GitWorkspacePane({ target, onClose, onChanged, repoSwitcher }: Props) {
             stagedView={treeMenu.stagedView}
             busy={!!busy}
             onIgnore={() => void ignoreTreePath(treeMenu.relativePath)}
+            onUntrack={() => void untrackTreePath(treeMenu.relativePath)}
             onHistory={() => setHistoryPath(treeMenu.relativePath)}
             onStage={() => void stage([treeMenu.relativePath])}
             onUnstage={() => void unstage([treeMenu.relativePath])}

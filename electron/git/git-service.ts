@@ -777,6 +777,30 @@ export class GitService {
     }
   }
 
+  /**
+   * 把已跟踪的路径从版本库移除（`git rm --cached`），**本地文件保留**。
+   *
+   * .gitignore 只对「未跟踪」的路径生效：已经提交过的目录写进去是空操作，
+   * 所以必须先移除再忽略。移除会把「删除」放进待提交区，提交后才真正
+   * 从版本库消失——这也是 Git 本身对这个操作的语义，不做任何额外处理。
+   */
+  async untrackPath(target: string, path: unknown): Promise<GitActionResult> {
+    try {
+      const root = await this.repoRoot(target);
+      const rel = safePath(path);
+      const tracked = await runGitResult(root, ["ls-files", "--", rel]);
+      if (tracked.code !== 0) throw new Error(tracked.stderr.trim() || "读取 Git 跟踪状态失败。");
+      if (!tracked.stdout.trim()) {
+        return { success: false, error: `${rel} 没有被 Git 跟踪，直接「忽略」即可，不需要从版本库移除。` };
+      }
+      // -r：目录需要递归；对单个文件无副作用。--cached：工作区文件原样保留。
+      await runGit(root, ["rm", "-r", "--cached", "--", rel]);
+      return { success: true, output: `已把 ${rel} 从版本库移除（本地文件保留），提交后生效` };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }
+
   /** 单个文件 / 目录的提交历史。 */
   async fileHistory(target: string, path: unknown, limit?: unknown): Promise<GitLogResult> {
     try {

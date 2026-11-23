@@ -65,6 +65,25 @@ describe("Git workspace modal", () => {
     expect(rule(".git-workspace-body")).toContain("grid-template-columns: clamp(");
   });
 
+  it("offers removing a tracked path from the index before ignoring it", () => {
+    const source = read("src/components/git/GitWorkspaceModal.tsx");
+    const menu = read("src/components/git/GitTreeMenu.tsx");
+    // 菜单项：已跟踪的路径只写 .gitignore 不生效，必须给「移除」入口
+    expect(menu).toContain("从版本库移除此目录…");
+    expect(menu).toContain("从版本库移除此文件…");
+    expect(menu).toContain("onUntrack");
+    // 先 git rm --cached 再写忽略：顺序反了 .gitignore 对已跟踪路径不生效
+    const untrackAt = source.indexOf("const untrackTreePath");
+    const removeAt = source.indexOf("gitUntrackPath(target.path, relativePath)", untrackAt);
+    const ignoreAt = source.indexOf("gitIgnorePath(target.path, relativePath)", untrackAt);
+    expect(untrackAt).toBeGreaterThan(-1);
+    expect(removeAt).toBeGreaterThan(untrackAt);
+    expect(ignoreAt).toBeGreaterThan(removeAt);
+    // 会把删除放进待提交，必须二次确认并说清本地文件保留
+    expect(source).toContain("本地文件会保留");
+    expect(source).toContain('confirmLabel: "移除并忽略"');
+  });
+
   it("offers a confirmed force-delete when Git refuses to delete an unmerged branch", () => {
     const source = read("src/components/git/GitWorkspaceModal.tsx");
     expect(source).toContain("gitDeleteBranch(target.path, branch.name, force)");

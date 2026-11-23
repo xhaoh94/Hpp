@@ -318,6 +318,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("git:blame", target, path),
   gitIgnorePath: (target: string, path: string): Promise<GitActionResult> =>
     ipcRenderer.invoke("git:ignorePath", target, path),
+  gitUntrackPath: (target: string, path: string): Promise<GitActionResult> =>
+    ipcRenderer.invoke("git:untrackPath", target, path),
   gitFileHistory: (target: string, path: string, limit?: number): Promise<GitLogResult> =>
     ipcRenderer.invoke("git:fileHistory", target, path, limit),
   gitShowCommit: (target: string, hash: string): Promise<GitCommitDiffResult> =>
