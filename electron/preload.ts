@@ -461,6 +461,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   agentCancelGuidance: (sessionId: string | undefined, guidanceId: string) =>
     ipcRenderer.invoke("agent:cancelGuidance", sessionId, guidanceId),
   agentAbort: (sessionId?: string) => ipcRenderer.invoke("agent:abort", sessionId),
+  agentStopSubagent: (sessionId: string | undefined, taskId: string) =>
+    ipcRenderer.invoke("agent:stopSubagent", sessionId, taskId),
   agentGetModels: (sessionId?: string, agentId?: string) =>
     ipcRenderer.invoke("agent:getModels", sessionId, agentId),
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) =>

@@ -33,6 +33,16 @@ const SOURCE_NOTES: Record<SessionContextUsage["source"], string> = {
   unknown: "来源未知",
 };
 
+/**
+ * 上次读到的阈值，按「渠道 + 模型」缓存。
+ *
+ * 弹窗每次打开都是重新挂载：没有这份缓存时会先显示默认值、几十毫秒后再跳到
+ * 真实值（一次可见的闪动）。缓存只负责首帧，随后仍会向主进程读一次。
+ */
+const thresholdCache = new Map<string, number>();
+const thresholdCacheKey = (model: { provider: string; id: string } | null | undefined) =>
+  model?.provider && model.id ? `${model.provider}:${model.id}` : "";
+
 /** 阈值标记的落点：按指针的 clientX 换算成轨道内的百分比。 */
 function percentFromTrack(track: HTMLElement | null, clientX: number): number {
   const rect = track?.getBoundingClientRect();
@@ -77,12 +87,18 @@ export function ContextUsageModal({
   const modalRef = useRef<HTMLDivElement>(null);
   const overlayStyle = useAnchoredOverlay(true, anchorRef, modalRef, { gap: 8 });
   const [compactRequested, setCompactRequested] = useState(false);
-  const [threshold, setThreshold] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
   const [draggingThreshold, setDraggingThreshold] = useState(false);
   const trackRef = useRef<HTMLDivElement>(null);
   // 阈值的作用域是「渠道 + 模型」：优先用当前选择，用量事件里带着模型时兜底。
   const thresholdModel = model ?? usage?.model ?? null;
   const thresholdEditable = !!thresholdModel?.provider && !!thresholdModel?.id;
+  // 首帧用缓存值，避免「先 100% 再跳 60%」的闪动。
+  const [threshold, setThreshold] = useState(() => {
+    const key = thresholdCacheKey(thresholdModel);
+    return (key ? thresholdCache.get(key) : undefined) ?? DEFAULT_CONTEXT_COMPACTION_THRESHOLD;
+  });
+  /** 用户已经动过滑块：迟到的读盘结果不能把他的手势覆盖回去。 */
+  const thresholdTouchedRef = useRef(false);
   /** 拖动中的临时值：松手才落盘，避免拖动过程反复写 settings.json。 */
   const dragRef = useRef<{ active: boolean; value: number; start: number }>({
     active: false,
@@ -92,16 +108,25 @@ export function ContextUsageModal({
 
   useEffect(() => {
     let alive = true;
+    thresholdTouchedRef.current = false;
     // 阈值按渠道 + 模型分别保存：切换模型后要重新读，不能沿用上一个模型的值。
+    const key = thresholdCacheKey(thresholdModel);
+    // 有缓存就先用缓存顶上，避免切换模型时短暂显示上一个模型的阈值。
+    setThreshold((key ? thresholdCache.get(key) : undefined) ?? DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
     void loadContextCompactionThreshold(thresholdModel).then((loaded) => {
-      if (alive) setThreshold(loaded);
+      if (!alive || thresholdTouchedRef.current) return;
+      setThreshold(loaded);
+      if (key) thresholdCache.set(key, loaded);
     });
     return () => { alive = false; };
   }, [thresholdModel?.provider, thresholdModel?.id]);
 
   const applyThreshold = (next: number) => {
     const normalized = normalizeContextCompactionThreshold(next);
+    thresholdTouchedRef.current = true;
     setThreshold(normalized);
+    const key = thresholdCacheKey(thresholdModel);
+    if (key) thresholdCache.set(key, normalized);
     // 只写入触发点：主进程拿它判定，拖动本身不构成「到达阈值」，也不会压缩。
     void saveContextCompactionThreshold(thresholdModel, normalized, { sessionId });
   };
@@ -111,6 +136,7 @@ export function ContextUsageModal({
   const handleThresholdPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!thresholdEditable) return;
     const percent = percentFromTrack(trackRef.current, event.clientX);
+    thresholdTouchedRef.current = true;
     dragRef.current = { active: true, value: percent, start: threshold };
     setDraggingThreshold(true);
     setThreshold(percent);

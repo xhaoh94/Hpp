@@ -96,6 +96,9 @@ type PendingClaudeGuidance = {
 const CLAUDE_WORKER_INIT_TIMEOUT_MS = 120_000;
 const FORK_DESCRIPTOR_PREFIX = "hpp-claude-fork:v1:";
 
+/** task_* 里的非子 Agent 任务类型（后台化的 Bash、MCP 调用、工作流）。 */
+const CLAUDE_NON_AGENT_TASK_TYPES = new Set(["local_bash", "local_shell", "mcp_task", "local_workflow"]);
+
 const asRecord = (value: unknown): UnknownRecord => isRecord(value) ? value : {};
 const optionalString = (value: unknown) => typeof value === "string" && value ? value : undefined;
 const isClaudeTaskOutputToolName = (value: unknown) => ["taskoutput", "task_output"]
@@ -698,6 +701,24 @@ export class ClaudeSDKAgent {
         }));
         break;
       }
+      case "token_usage": {
+        // worker 对每条 API 响应逐条上报（去重后的增量），这里只做转发：
+        // 回合进行中底部统计才有数字，不必等 prompt_done。
+        if (!this.turnActive || this.isAborting) break;
+        const inputTokens = Number(data.inputTokens) || 0;
+        const outputTokens = Number(data.outputTokens) || 0;
+        const cacheInputTokens = Number(data.cacheInputTokens) || 0;
+        if (inputTokens <= 0 && outputTokens <= 0) break;
+        const contextTokens = Number(data.contextTokens) || 0;
+        this.emitEvent({
+          type: "token_usage",
+          inputTokens,
+          outputTokens,
+          cacheInputTokens,
+          ...(contextTokens > 0 ? { contextTokens, contextPrecision: "estimated" } : {}),
+        });
+        break;
+      }
       case "prompt_done":
         // A late terminal record from an aborted/restarted SDK query must not
         // settle the newer prompt. Doing so would leave its id behind while
@@ -712,12 +733,15 @@ export class ClaudeSDKAgent {
           const outputTokens = Number(usage.output_tokens) || 0;
           const cacheInputTokens = Number(usage.cache_read_input_tokens) || 0;
           if (inputTokens > 0 || outputTokens > 0) {
+            // worker 会把「最后一条响应的输入长度」当作上下文占用传过来：
+            // 它才是当下的上下文大小，整回合输入之和（多轮请求累加）不是。
+            const measuredContext = Number(data.contextTokens) || 0;
             this.emitEvent({
               type: "token_usage",
               inputTokens,
               outputTokens,
               cacheInputTokens,
-              contextTokens: inputTokens,
+              contextTokens: measuredContext > 0 ? measuredContext : inputTokens,
               contextPrecision: "estimated",
             });
           }
@@ -727,7 +751,7 @@ export class ClaudeSDKAgent {
         break;
       case "context_usage": {
         // SDK 的 getContextUsage 读数：只更新上下文占用，不带本回合消耗，
-        // 否则会和 prompt_done 那份 usage 重复计入 token 统计。
+        // 否则会和逐条 usage / prompt_done 重复计入 token 统计。
         const contextTokens = Number(data.contextTokens) || 0;
         const contextWindow = Number(data.contextWindow) || 0;
         const breakdown = Array.isArray(data.breakdown)
@@ -786,6 +810,10 @@ export class ClaudeSDKAgent {
   }
 
   private handleClaudeSubagentWorkerEvent(data: UnknownRecord, phase: "started" | "update" | "end") {
+    // claude 的 task_* 事件也覆盖 Bash / MCP / 工作流任务，只有 local_agent 是子 Agent。
+    // worker 已按类型筛过一遍，这里再兜一次——旧版 worker 或漏筛时不会凭空多一张卡片。
+    const taskType = getFirstNonEmptyString(data, ["taskType", "task_type"])?.toLowerCase();
+    if (taskType && CLAUDE_NON_AGENT_TASK_TYPES.has(taskType)) return;
     const metadata = getClaudeSubagentMetadata(data);
     const input = getClaudeSubagentInput(data.input || data.args || metadata.input);
     const taskId = getFirstNonEmptyString(data, ["taskId", "task_id", "agentId", "agent_id"])

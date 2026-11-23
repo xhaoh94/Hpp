@@ -14,6 +14,7 @@ const TEST_HOST_SYSTEM_PROMPT = `[HPP 语言规则]
 
 const fakeSDKSource = `
 import { appendFileSync } from "node:fs";
+export const VERSION = "1.6.0";
 const registeredExtensionCommands = process.env.PI_TEST_REGISTERED_COMMANDS
   ? JSON.parse(process.env.PI_TEST_REGISTERED_COMMANDS)
   : [];
@@ -39,8 +40,11 @@ class FakeSession {
   beforeAgentStartHandlers = [];
   beforeProviderRequestHandlers = [];
   sessionBeforeCompactHandlers = [];
+  sessionStartHandlers = [];
+  sessionTreeHandlers = [];
   registeredTools = [];
   compactCalls = [];
+  clearQueueCalls = 0;
   resourceLoader = null;
   extraTools = null;
   lastSystemPrompt = "BASE_SYSTEM_PROMPT";
@@ -67,6 +71,8 @@ class FakeSession {
           if (eventName === "before_agent_start") this.beforeAgentStartHandlers.push(handler);
           if (eventName === "before_provider_request") this.beforeProviderRequestHandlers.push(handler);
           if (eventName === "session_before_compact") this.sessionBeforeCompactHandlers.push(handler);
+          if (eventName === "session_start") this.sessionStartHandlers.push(handler);
+          if (eventName === "session_tree") this.sessionTreeHandlers.push(handler);
         },
         registerTool: (tool) => this.registeredTools.push(tool),
       });
@@ -81,20 +87,45 @@ class FakeSession {
   async reload() {
     this.reloadCount += 1;
     this.syncToolsFromLoader();
+    // 真实 SDK 的 session.reload() 会重建 extensionRunner 并重新加载 inline
+    // 工厂；只重读 builtinExtensions 测不出「热切换后 Hpp 自己的工具丢了」。
+    this.rebindInlineFactories();
   }
   // 真实 SDK 在 createAgentSession 里就按当时的 loader 建工具表，
   // 所以这里既要在构造后同步一次，也要在 reload 后同步。
   syncToolsFromLoader() {
     const builtin = this.resourceLoader?.builtinExtensions ?? new Map();
+    const disabled = this.resourceLoader?.disabledBuiltinExtensions ?? new Set();
+    const enabled = [...builtin.keys()].filter((key) => !disabled.has(key));
     const base = ["read", "bash", "edit", "write", "grep", "find", "ls", "ask_user_question"];
     const names = new Set(base);
     // 内置扩展注册的工具：codemode → codemode，tool-search → tool_search。
-    for (const key of builtin.keys()) names.add(key.replace("-", "_"));
+    for (const key of enabled) names.add(key.replace("-", "_"));
     // MCP 工具带上注解与 exposure，宿主要靠注解做权限分类。
-    if (builtin.has("mcp") && process.env.PI_TEST_MCP_TOOLS === "1") {
+    if (enabled.includes("mcp") && process.env.PI_TEST_MCP_TOOLS === "1") {
       for (const tool of MCP_PROBE_TOOLS) names.add(tool.name);
     }
     this.extraTools = [...names];
+  }
+  rebindInlineFactories() {
+    const factories = this.resourceLoader?.extensionFactories;
+    if (!Array.isArray(factories)) return;
+    this.registeredTools = [];
+    for (const input of factories) {
+      if (typeof input !== "function" && input.builtin === true) continue;
+      const factory = typeof input === "function" ? input : input.factory;
+      factory({
+        on: (eventName, handler) => {
+          if (eventName === "tool_call") this.toolCallHandlers.push(handler);
+          if (eventName === "before_agent_start") this.beforeAgentStartHandlers.push(handler);
+          if (eventName === "before_provider_request") this.beforeProviderRequestHandlers.push(handler);
+          if (eventName === "session_before_compact") this.sessionBeforeCompactHandlers.push(handler);
+          if (eventName === "session_start") this.sessionStartHandlers.push(handler);
+          if (eventName === "session_tree") this.sessionTreeHandlers.push(handler);
+        },
+        registerTool: (tool) => this.registeredTools.push(tool),
+      });
+    }
   }
   getAllTools() {
     const withMeta = (name) => {
@@ -142,6 +173,7 @@ class FakeSession {
     this.listener?.({ type: "agent_settled" });
   }
   async steer() {}
+  clearQueue() { this.clearQueueCalls += 1; }
   dispose() {}
 
   async emitBeforeProviderRequest(payload) {
@@ -207,6 +239,50 @@ class FakeSession {
       const names = [...this.activeTools].sort();
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(names) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "registered-tools") {
+      const names = this.registeredTools.map((tool) => String(tool?.name || "")).sort();
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(names) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "queue-state") {
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ clearQueueCalls: this.clearQueueCalls }) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "extension-paths") {
+      const loader = this.resourceLoader;
+      const result = {
+        paths: loader?.lastLoadedPaths || [],
+        factoryNames: (loader?.extensionFactories || []).map((input) => (
+          typeof input === "function" ? "(fn)" : input.name
+        )),
+      };
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result) }], stopReason: "stop" } });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
+    if (message === "builtin-extension-state") {
+      const loader = this.resourceLoader;
+      const result = {
+        all: [...(loader?.builtinExtensions?.keys() || [])].sort(),
+        disabled: [...(loader?.disabledBuiltinExtensions || [])].sort(),
+        enabled: [...(loader?.builtinExtensions?.keys() || [])]
+          .filter((key) => !(loader?.disabledBuiltinExtensions || new Set()).has(key))
+          .sort(),
+      };
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result) }], stopReason: "stop" } });
       this.listener?.({ type: "agent_end" });
       this.listener?.({ type: "agent_settled" });
       return;
@@ -590,17 +666,33 @@ export class DefaultResourceLoader {
   constructor(options = {}) {
     const factories = options.extensionFactories || [];
     // 复刻真实 SDK 的分流：带 builtin:true 的进 builtinExtensions Map，
-    // 其余留在 extensionFactories。session.reload() 只读前者。
+    // 其余留在 extensionFactories。1.5+ 用 disabledBuiltinExtensions 表达开关。
     this.builtinExtensions = new Map(
       factories
         .filter((input) => typeof input !== "function" && input.builtin === true)
         .map((input) => [input.name, input]),
     );
-    this.extensionFactories = factories;
+    this.disabledBuiltinExtensions = new Set(options.disabledBuiltinExtensions || []);
+    // 真实 loader 只在构造时拆一次：builtin 工厂从 extensionFactories 移除，
+    // 由 builtinExtensions Map 持有；reload 会把 extensionFactories 里剩下的
+    // 每一项都当成 <inline:N> 加载。测试替身必须复刻，否则测不出重复加载。
+    this.extensionFactories = factories.filter(
+      (input) => typeof input === "function" || input.builtin !== true,
+    );
+    this.lastLoadedPaths = [];
     this.appendSystemPrompt = options.appendSystemPrompt || [];
     this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths || [];
   }
-  async reload() {}
+  async reload() {
+    this.lastLoadedPaths = [
+      ...[...this.builtinExtensions.keys()]
+        .filter((name) => !this.disabledBuiltinExtensions.has(name))
+        .map((name) => \`builtin:\${name}\`),
+      ...this.extensionFactories.map((input, index) => (
+        typeof input === "function" ? \`<inline:\${index + 1}>\` : \`<inline:\${input.name}>\`
+      )),
+    ];
+  }
   getSkills() { return { skills: [{ name: "review", description: "Review changes" }] }; }
   getPrompts() {
     const prompts = [{ name: "release", description: "Prepare release", usage: "[version]" }];
@@ -744,6 +836,9 @@ const startWorker = (runtimeRoot: string, agentDir: string, extraEnv: NodeJS.Pro
     env: { ...process.env, PI_SDK_PACKAGE_ROOT: runtimeRoot, PI_CODING_AGENT_DIR: agentDir, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (process.env.PI_TEST_DEBUG_STDERR === "1") {
+    child.stderr?.on("data", (chunk) => console.error("[worker-stderr]", chunk.toString()));
+  }
   const messages: WorkerMessage[] = [];
   const waiters: Array<{
     predicate: (message: WorkerMessage) => boolean;
@@ -1027,6 +1122,96 @@ describe("Pi SDK worker protocol", () => {
     expect(JSON.parse(afterOff.message.text)).not.toContain("codemode");
   });
 
+  it("keeps present_files after hot-toggling builtin extensions", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    // 回归：applyBuiltinExtensionConfig 曾自己拼一份工厂列表，漏了 present_files；
+    // 会话进行中切换 codemode / mcp / tool_search 后，该工具就从工具表里消失了。
+    worker.send({ id: "ext-present-on", type: "setBuiltinExtensions", config: { codemode: true } });
+    await worker.waitFor(
+      (message) => message.type === "builtin_extensions_changed" && message.id === "ext-present-on",
+    );
+
+    worker.send({ id: "tools-present", type: "prompt", message: "registered-tools", permissionMode: "full-access" });
+    const ended = await worker.waitFor((message) => message.type === "message_end");
+    const tools = JSON.parse(ended.message.text);
+    expect(tools).toContain("present_files");
+    expect(tools).toContain("todo_write");
+  });
+
+  it("acknowledges subagentStop for unknown background tasks", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "stop-bg", type: "subagentStop", taskId: "sa_missing" });
+    const stopped = await worker.waitFor((message) => message.type === "subagent_stopped" && message.id === "stop-bg");
+    expect(stopped).toMatchObject({ taskId: "sa_missing", stopped: false });
+  });
+
+  it("hot-toggles via disabledBuiltinExtensions without dropping builtin factories", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({
+      id: "init",
+      type: "init",
+      projectPath: tempRoot,
+      builtinExtensions: { codemode: true },
+    });
+    await worker.waitFor((message) => message.type === "ready");
+
+    const readState = async (id: string) => {
+      const start = worker.messages.length;
+      worker.send({ id, type: "prompt", message: "builtin-extension-state", permissionMode: "full-access" });
+      const ended = await worker.waitFor(
+        (message) => message.type === "message_end" && worker.messages.indexOf(message) >= start,
+      );
+      return JSON.parse(ended.message.text);
+    };
+    const readPaths = async (id: string) => {
+      const start = worker.messages.length;
+      worker.send({ id, type: "prompt", message: "extension-paths", permissionMode: "full-access" });
+      const ended = await worker.waitFor(
+        (message) => message.type === "message_end" && worker.messages.indexOf(message) >= start,
+      );
+      return JSON.parse(ended.message.text) as { paths: string[]; factoryNames: string[] };
+    };
+
+    const initial = await readState("state-1");
+    // 工厂始终全量留在 loader 里；开关只通过 disabled 集合表达。
+    expect(initial.all).toEqual(["codemode", "mcp", "tool_search"]);
+    expect(initial.disabled).toEqual(["mcp", "tool_search"]);
+    expect(initial.enabled).toEqual(["codemode"]);
+
+    const initialPaths = await readPaths("paths-1");
+    expect(initialPaths.paths).toContain("builtin:codemode");
+    expect(initialPaths.paths).not.toContain("builtin:mcp");
+    // inline 工厂里绝不能出现 builtin 名字（否则 reload 会重复加载一份）。
+    expect(initialPaths.factoryNames).not.toContain("codemode");
+    expect(initialPaths.factoryNames).not.toContain("mcp");
+    expect(initialPaths.factoryNames).not.toContain("tool_search");
+    expect(initialPaths.paths.some((path) => path.startsWith("builtin:mcp"))).toBe(false);
+
+    worker.send({ id: "toggle-mcp", type: "setBuiltinExtensions", config: { mcp: true } });
+    await worker.waitFor(
+      (message) => message.type === "builtin_extensions_changed" && message.id === "toggle-mcp",
+    );
+    const afterMcp = await readState("state-2");
+    expect(afterMcp.all).toEqual(["codemode", "mcp", "tool_search"]);
+    expect(afterMcp.enabled).toEqual(["mcp"]);
+    expect(afterMcp.disabled).toEqual(["codemode", "tool_search"]);
+
+    const afterPaths = await readPaths("paths-2");
+    expect(afterPaths.paths).toContain("builtin:mcp");
+    expect(afterPaths.paths).not.toContain("builtin:codemode");
+    // 关闭 codemode 后不能残留 <inline:codemode>。
+    expect(afterPaths.factoryNames).not.toContain("codemode");
+    expect(afterPaths.paths.some((path) => path.includes("inline:codemode"))).toBe(false);
+  });
+
   it("ignores unknown builtin extension ids", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
@@ -1269,6 +1454,64 @@ describe("Pi SDK worker protocol", () => {
     );
     expect(rejected.type).toBe("error");
     expect(String(rejected.error)).toContain("本轮已结束");
+  });
+
+  it("clears the steer queue when the user aborts", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    // 默认分支会等待用户回答问卷，保持 agent run 活跃。
+    worker.send({ id: "wait-ui", type: "prompt", message: "wait-for-ui", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "agent_start");
+    worker.send({ id: "guide-abort", type: "guidance", message: "取消前入队的引导" });
+    await worker.waitFor((message) => message.id === "guide-abort" && message.type === "guidance_done");
+
+    worker.send({ id: "abort-queue", type: "abort" });
+    await worker.waitFor((message) => message.type === "aborted" && message.id === "abort-queue");
+
+    worker.send({ id: "read-queue", type: "prompt", message: "queue-state", permissionMode: "full-access" });
+    const ended = await worker.waitFor((message) => message.type === "message_end" && JSON.parse(message.message.text).clearQueueCalls > 0);
+    expect(JSON.parse(ended.message.text).clearQueueCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("dispose 命令先回 disposed ack 再退出", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    const exited = new Promise<number | null>((resolve) => {
+      worker.child.once("exit", (code) => resolve(code));
+    });
+    worker.send({ id: "dispose-ack", type: "dispose" });
+    const ack = await worker.waitFor((message) => message.type === "disposed" && message.id === "dispose-ack");
+    expect(ack).toBeTruthy();
+    const code = await Promise.race([
+      exited,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("worker did not exit")), 5000)),
+    ]);
+    expect(code).toBe(0);
+  });
+
+  it("stdin 关闭后 worker 退出，不留孤儿进程", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    // 宿主崩溃/被 kill 后 stdin 会关闭：worker 必须自己退出，
+    // 否则它派生的后台子 Agent 会一直常驻。
+    const exited = new Promise<number | null>((resolve) => {
+      worker.child.once("exit", (code) => resolve(code));
+    });
+    worker.child.stdin?.end();
+    const code = await Promise.race([
+      exited,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("worker did not exit")), 5000)),
+    ]);
+    expect(code).toBe(0);
   });
 
   it("reports a failed compaction instead of marking it completed", async () => {
@@ -1839,23 +2082,25 @@ describe("Pi SDK worker protocol", () => {
     });
   });
 
-  it("returns an error for a UI response without a matching request", async () => {
+  it("treats a UI response without a matching request as idempotent", async () => {
     const worker = startWorker(runtimeRoot, agentDir);
     children.push(worker.child);
     worker.send({ id: "init", type: "init", projectPath: tempRoot });
     await worker.waitFor((message) => message.type === "ready");
 
+    // 双击确认 / 请求已被 abort 清掉时，应答晚到不应报错：
+    // 报错只会给调用方一个无意义的失败，且 request id 还留在 pending 里。
     worker.send({
       id: "ui-missing",
       type: "uiResponse",
       response: { id: "missing-request", text: "answer" },
     });
 
-    await expect(worker.waitFor((message) => message.type === "error" && message.id === "ui-missing"))
+    await expect(worker.waitFor((message) => message.type === "ui_response_done" && message.id === "ui-missing"))
       .resolves.toMatchObject({
-        type: "error",
+        type: "ui_response_done",
         id: "ui-missing",
-        error: "Unknown Pi UI request: missing-request",
+        duplicate: true,
       });
   });
 

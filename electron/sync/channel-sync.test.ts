@@ -170,7 +170,8 @@ describe("目标管理", () => {
     });
     expect(result.success).toBe(false);
     expect(result.error).toContain("系统安全存储不可用");
-    expect(result.error).toContain("gnome-keyring");
+    // 提示是分平台的：Linux 指向 gnome-keyring / KWallet，其它平台指向系统凭据管理器。
+    expect(result.error).toContain(process.platform === "linux" ? "gnome-keyring" : "系统凭据管理器");
     // 失败时不能留下半截目标：界面仍能正常读取空列表。
     expect(await listChannelSyncTargets()).toEqual([]);
   });

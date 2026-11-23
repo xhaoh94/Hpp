@@ -26,22 +26,78 @@ const loadBuiltinBackend = async (backendName, sessionId, emit, context) => {
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
+const MAX_EVENT_BYTES = 1024 * 1024;
+const MAX_EVENT_FIELD_BYTES = 64 * 1024;
+
+/**
+ * 超大事件裁剪到 1 MB 以内，而不是直接 throw。
+ *
+ * 以前超过 1 MB 就抛错，异常一路冒泡到 backend 的「忽略非协议输出」catch，
+ * 结果是 history_snapshot / tool_execution_end 这类关键事件凭空消失，
+ * 工具永久 running、历史恢复空白，且定时器路径会崩掉整个插件宿主。
+ * 这里保留 type/id，把大字段换成占位，让状态机至少能继续走。
+ */
+const serializeEventBody = (event) => {
+  let serialized;
+  try {
+    serialized = JSON.stringify(event);
+  } catch (error) {
+    return JSON.stringify({
+      type: event.type,
+      ...(event.id !== undefined ? { id: event.id } : {}),
+      __truncated: true,
+      detail: `事件无法序列化：${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  if (Buffer.byteLength(serialized, "utf8") <= MAX_EVENT_BYTES) return serialized;
+
+  const copy = { ...event, __truncated: true };
+  for (const [key, value] of Object.entries(copy)) {
+    if (key === "__truncated" || key === "type" || key === "id") continue;
+    let fieldBytes = 0;
+    try {
+      fieldBytes = Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
+    } catch {
+      fieldBytes = 0;
+    }
+    if (fieldBytes <= MAX_EVENT_FIELD_BYTES) continue;
+    copy[key] = typeof value === "string"
+      ? `${value.slice(0, Math.floor(MAX_EVENT_FIELD_BYTES / 4))}\u2026[truncated ${fieldBytes} bytes]`
+      : `[omitted ${fieldBytes} bytes]`;
+    serialized = JSON.stringify(copy);
+    if (Buffer.byteLength(serialized, "utf8") <= MAX_EVENT_BYTES) return serialized;
+  }
+
+  // 字段多而碎、裁完仍超限：只保留类型与 id，保证状态机能继续。
+  return JSON.stringify({
+    type: event.type,
+    ...(event.id !== undefined ? { id: event.id } : {}),
+    __truncated: true,
+    detail: `事件超过 ${MAX_EVENT_BYTES} 字节，已裁剪`,
+  });
+};
+
 const serializeEvent = (event) => {
   if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string" || !event.type.trim()) {
     throw new Error("Plugin events must include a non-empty type.");
   }
-  const serialized = JSON.stringify(event);
-  if (Buffer.byteLength(serialized, "utf8") > 1024 * 1024) {
-    throw new Error("Plugin event exceeds the 1 MB size limit.");
-  }
-  return serialized;
+  return serializeEventBody(event);
 };
 
 // 事件信封手工拼接：event 只在校验时序列化一次，发送时直接复用。
 // 旧写法先 stringify 校验、再随信封 stringify 一遍，大事件（历史快照、
 // 长工具输出）会白做一次整份序列化。
 const emitEvent = (backendId, event) => {
-  process.stdout.write(`{"kind":"event","backendId":${JSON.stringify(backendId)},"event":${serializeEvent(event)}}\n`);
+  // 这里只可能抛「结构非法」（缺 type）：那是插件 bug，必须让它冒泡到
+  // backend 的 sendMessage，宿主才能把这一轮判成失败并在界面上说明。
+  // 超大但结构合法的事件已经在 serializeEventBody 里裁剪过，不会走到这里 ——
+  // 之前为了避免超大事件炸掉宿主，把这一类也一起吞了，代价是坏事件彻底静默。
+  const body = serializeEvent(event);
+  try {
+    process.stdout.write(`{"kind":"event","backendId":${JSON.stringify(backendId)},"event":${body}}\n`);
+  } catch {
+    // stdout 关闭（宿主退出）由 readline close 分支收尾。
+  }
 };
 
 const requestHost = (method, args = []) => new Promise((resolve, reject) => {

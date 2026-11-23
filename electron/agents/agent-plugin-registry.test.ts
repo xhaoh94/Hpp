@@ -708,6 +708,60 @@ export function getStatus() {
     });
   });
 
+  it("starts a fresh lifecycle for a host-initiated auto-wake turn", async () => {
+    const source = await createPluginSource(
+      tempRoot,
+      "host-turn-agent",
+      "1.0.0",
+      undefined,
+      `
+export function createAgentBackend(context) {
+  return {
+    setWindow() {},
+    async init() {},
+    isIdle() { return true; },
+    async sendMessage() {
+      context.sendEvent({
+        type: "host_turn_started",
+        id: "host:1",
+        reason: "subagent_result",
+        taskIds: ["sa_1"],
+        clientUserMessageId: "host:host:1",
+      });
+      context.sendEvent({ type: "stream_delta", delta: "继续处理" });
+    },
+    async abort() {},
+    async getModels() { return []; },
+    async setModel() {},
+    async setThinkingLevel() {},
+    sendUIResponse() {},
+    dispose() {},
+    get sessionFilePath() { return null; },
+  };
+}
+`,
+    );
+    await registry.installFromPath(source);
+    const send = vi.fn();
+    const backend = await registry.createBackend("host-turn-agent", "session-1", {
+      window: { webContents: { send } } as never,
+    });
+
+    await backend.sendMessage("用户消息", undefined, { clientMessageId: "client-user-1" });
+
+    const turnLifecycle = send.mock.calls.find((call) => call[1].type === "turn_lifecycle")?.[1];
+    const hostStart = send.mock.calls.find((call) => call[1].type === "host_turn_started")?.[1];
+    const delta = send.mock.calls.find((call) => call[1].type === "stream_delta")?.[1];
+    // 宿主回合必须换一个 lifecycle，并让后续事件沿用同一个合成回合身份。
+    expect(hostStart?.lifecycleRevision).toBeTruthy();
+    expect(hostStart?.lifecycleRevision).not.toBe(turnLifecycle?.lifecycleRevision);
+    expect(hostStart?.clientUserMessageId).toBe("host:host:1");
+    expect(delta).toMatchObject({
+      lifecycleRevision: hostStart?.lifecycleRevision,
+      clientUserMessageId: "host:host:1",
+    });
+  });
+
   it("overrides conflicting plugin lifecycle identity with the host-owned turn", async () => {
     const source = await createPluginSource(
       tempRoot,

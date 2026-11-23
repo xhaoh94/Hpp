@@ -81,6 +81,8 @@ export interface AgentBackend {
   setCompactionConfig?(config: AgentCompactionConfig): Promise<void>;
   /** 热更新内置 SubAgent 配置；未实现时在下次初始化读取。 */
   setSubagentConfig?(config: AgentSubagentConfig): Promise<void>;
+  /** 停止一个后台子任务；不支持后台任务的后端不实现。 */
+  stopSubagent?(taskId: string): Promise<boolean>;
   /**
    * 热更新上游可选内置扩展的启用状态；未实现时只能下次初始化读取。
    * 返回的 config 只含启用项（`{ [id]: true }`）。

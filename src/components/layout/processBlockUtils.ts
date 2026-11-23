@@ -116,6 +116,21 @@ export const getSubagentTitle = (prompt?: string, fallback?: string): string => 
 };
 
 /**
+ * 胶囊/页签/悬停卡的标题出口。
+ *
+ * 调度方给的 title 也要过一遍压缩：claude 的 Task 工具没有独立 title 参数，
+ * description 常常是一整句（「确认 present 扩展引用并定位 pi SDK 安装」），
+ * 直接信任它，胶囊就会被整句撑满 —— 极简标题就白做了。
+ */
+export const getSubagentDisplayTitle = (
+  subagent: { title?: string; prompt?: string; label?: string },
+): string => {
+  const given = subagent.title?.trim();
+  if (given) return getSubagentTitle(given) || given;
+  return getSubagentTitle(subagent.prompt, subagent.label);
+};
+
+/**
  * 一级展开内容：prompt 的第一个分句，保留原始修饰（如「独立编写行为测试」）。
  * 胶囊/面板用 getSubagentTitle 把它压成动宾「编写测试」，两者刻意不同；
  * 这里不压缩，完整 prompt 仍走 title 悬停、细节在二级。

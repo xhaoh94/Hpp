@@ -9,6 +9,8 @@ import {
   getContextCompactionPresentation,
   getThinkingPreviewMarkdown,
   getTodoPlanStepIdsFromToolResult,
+  getPlanStepsSnapshotFromEvent,
+  getPlanStepsSnapshotFromToolResult,
   getToolSummary,
   getUIResponsePayload,
   markSessionRuntimeTurnSettled,
@@ -18,6 +20,27 @@ import {
   resetSessionRuntimeAfterTurn,
   summarizeRuntimeChanges,
 } from "./agentEventUtils";
+
+describe("agentEventUtils plan snapshots", () => {
+  it("distinguishes an explicit empty plan from missing plan data", () => {
+    expect(getPlanStepsSnapshotFromToolResult({
+      type: "tool_end",
+      details: { tasks: [] },
+    } as AgentEvent)).toEqual([]);
+    expect(getPlanStepsSnapshotFromToolResult({
+      type: "tool_end",
+      details: { other: [] },
+    } as AgentEvent)).toBeNull();
+    expect(getPlanStepsSnapshotFromEvent({
+      type: "plan_update",
+      steps: [],
+    } as AgentEvent)).toEqual([]);
+    expect(getPlanStepsSnapshotFromEvent({
+      type: "plan_update",
+      detail: { unrelated: true },
+    } as AgentEvent)).toBeNull();
+  });
+});
 
 describe("agentEventUtils", () => {
   it("resets the notice slot after a turn settles", () => {

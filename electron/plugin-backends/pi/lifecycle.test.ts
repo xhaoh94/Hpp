@@ -38,6 +38,11 @@ const respondToInit = (
       if (command.type === "setCompactionConfig") {
         child.stdout.write(`${JSON.stringify({ type: "compaction_config_changed", id: command.id })}\n`);
       }
+      if (command.type === "dispose") {
+        // 真实 worker 先回 disposed ack 再退出；测试替身不模拟就会每用例多等 4s。
+        child.stdout.write(`${JSON.stringify({ type: "disposed", id: command.id })}\n`);
+        child.emit("exit", 0);
+      }
     }
   });
 };
@@ -62,6 +67,39 @@ describe("Pi lifecycle", () => {
     expect(events).toEqual([]);
   });
 
+  it("dispose 会让在途 init 立刻失败，而不是挂到超时", async () => {
+    const child = new FakePiProcess();
+    (child as unknown as { exitCode: number }).exitCode = 0;
+    spawnMock.mockReturnValue(child);
+    const agent = new PiSDKAgent("hpp-session");
+
+    // 只回 dispose ack，不响应 init（让 init 保持挂起）。
+    child.stdin.on("data", (chunk) => {
+      for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
+        const command = JSON.parse(line) as Record<string, unknown>;
+        if (command.type === "dispose") {
+          child.stdout.write(`${JSON.stringify({ type: "disposed", id: command.id })}\n`);
+          child.emit("exit", 0);
+        }
+      }
+    });
+
+    // 故意不响应 init，让它停在等 ready 的状态。
+    const initError = agent.init("C:\\project").then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const startedAt = Date.now();
+    await agent.dispose();
+    const error = await initError;
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error?.message || error)).toMatch(/disposed|superseded/);
+    // 不能等 60s 的 init 超时；dispose 必须主动让在途 init 失败。
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("does not report a control RPC as an active conversation turn", () => {
     const agent = new PiSDKAgent("hpp-session");
     const internals = agent as unknown as {
@@ -69,6 +107,43 @@ describe("Pi lifecycle", () => {
     };
     internals.pendingResponses.set("models-request", vi.fn());
 
+    expect(agent.isIdle()).toBe(true);
+  });
+
+  it("无 phase 的压缩兜底事件不会提前结束 compactionActive", () => {
+    const agent = new PiSDKAgent("hpp-session");
+    const internals = agent as unknown as {
+      compactionActive: boolean;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.compactionActive = true;
+
+    // 旧 SDK 的兜底事件只知道「发生了压缩」，不带 phase：不能当成结束。
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-1" });
+    expect(internals.compactionActive).toBe(true);
+
+    internals.handleWorkerMessage({ type: "context_compaction", id: "compact-1", phase: "completed" });
+    expect(internals.compactionActive).toBe(false);
+  });
+
+  it("子 Agent 问卷被取消后清掉 pending UI 请求，isIdle 恢复", () => {
+    const agent = new PiSDKAgent("hpp-session");
+    const internals = agent as unknown as {
+      pendingUIRequestIds: Set<string>;
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+    };
+    internals.pendingUIRequestIds.add("req-1");
+    expect(agent.isIdle()).toBe(false);
+
+    // worker 取消子 Agent 问卷时只发 process_event，不清理就会让 isIdle 恒为 false。
+    internals.handleWorkerMessage({
+      type: "process_event",
+      requestId: "req-1",
+      entryType: "question",
+      state: "interrupted",
+    });
+
+    expect(internals.pendingUIRequestIds.has("req-1")).toBe(false);
     expect(agent.isIdle()).toBe(true);
   });
 

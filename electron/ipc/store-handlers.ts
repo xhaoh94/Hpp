@@ -1,7 +1,7 @@
 import { BrowserWindow, dialog, ipcMain } from "electron";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, renameSync } from "fs";
-import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { app } from "electron";
 import type { SessionDataPurgeRequest } from "../../src/types/ipc";
@@ -19,6 +19,13 @@ const dataDir = join(app.getPath("userData"), "hpp-data");
 const ALLOWED_STORE_KEYS = new Set(["settings", "projects", "currentModel", "editor"]);
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const SESSION_MESSAGES_DB_PATH = join(dataDir, "session-messages.sqlite");
+/**
+ * Pi 后台子 Agent 的会话/结果目录。文件名由 worker 按会话 id 派生目录，
+ * 删除父会话时必须一并清掉，否则会一直堆在磁盘上。
+ */
+const PI_SUBAGENT_DATA_DIR = join(process.env.HPP_DATA_DIR || dataDir, "pi-subagents");
+const sanitizeSubagentDirName = (value: string) =>
+  String(value || "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "default";
 /** 旧版把全部会话消息放在这一个 JSON 里，SQLite 上线后只用于一次性导入。 */
 const LEGACY_SESSION_MESSAGES_JSON_PATH = join(dataDir, "sessionMessages.json");
 /** freelist 占比达到该值且空闲页够多时才做 VACUUM（它会阻塞主进程并需要约两倍临时空间）。 */
@@ -631,6 +638,37 @@ async function purgeSessionStore(request: SessionDataPurgeRequest) {
       hasValidSessionIds ? normalizeIds(request.validSessionIds) : undefined,
     );
   });
+  await purgePiSubagentDirs(
+    sessionIds,
+    hasValidSessionIds ? normalizeIds(request.validSessionIds) : undefined,
+  );
+}
+
+/**
+ * 清理 Pi 子 Agent 数据目录。
+ *
+ * 显式删除的会话：删对应子目录；带 validSessionIds 的全量清理：把不在
+ * 有效集合里的孤儿目录一并删掉。目录缺失 / 权限问题不应阻断会话删除。
+ */
+async function purgePiSubagentDirs(
+  sessionIds: Set<string>,
+  validSessionIds?: Set<string>,
+): Promise<void> {
+  const targets = new Set([...sessionIds].map(sanitizeSubagentDirName));
+  if (validSessionIds) {
+    const valid = new Set([...validSessionIds].map(sanitizeSubagentDirName));
+    try {
+      for (const entry of await readdir(PI_SUBAGENT_DATA_DIR, { withFileTypes: true })) {
+        if (!entry.isDirectory() || valid.has(entry.name)) continue;
+        targets.add(entry.name);
+      }
+    } catch {
+      // 目录还不存在（从未派发过后台任务）。
+    }
+  }
+  await Promise.all([...targets].map((name) => (
+    rm(join(PI_SUBAGENT_DATA_DIR, name), { recursive: true, force: true }).catch(() => undefined)
+  )));
 }
 
 async function queueStoreWrite(key: string, write: () => Promise<void>): Promise<void> {

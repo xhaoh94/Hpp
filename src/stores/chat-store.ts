@@ -59,6 +59,14 @@ export interface AgentSubagent {
   completedAt?: number;
   lastActivityAt?: number;
   liveOutput?: string;
+  /** 后台派发的子任务（主回合结束后仍继续运行）。 */
+  background?: boolean;
+  /** 后台任务 id（sa_xxx），停止与续聊使用。 */
+  taskId?: string;
+  /** 完整结果文件路径（后台任务）。 */
+  resultFile?: string;
+  /** 已完成的对话轮数（含续聊）。 */
+  rounds?: number;
 }
 
 export interface AgentProcessEntry extends ProcessEntryView {
@@ -327,7 +335,7 @@ interface ChatState {
    * 之后的事件就会在压缩分隔线下方新建一条消息继续输出。
    */
   sealLastAssistantForCompaction: (sessionId?: string | null) => void;
-  updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null) => void;
+  updateLastAssistantProcessMeta: (patch: { planSteps?: AgentProcessStep[]; planStepsSource?: AgentProcess["planStepsSource"]; changeSummary?: AgentProcessChangeSummary }, sessionId?: string | null, options?: { createIfMissing?: boolean }) => void;
   addAssistantTokenUsage: (
     inputTokens: number,
     outputTokens: number,
@@ -640,7 +648,13 @@ export const hasOpenAssistantProcessState = (message: ChatMessage) => {
     || process.entries.some((entry) => (
       entry.state === "running"
       || entry.phase === "started"
-      || entry.subagents?.some((subagent) => subagent.status === "pending" || subagent.status === "running")
+      // 后台子任务有独立生命周期：父回合结束后它们仍在跑，不代表会话回合
+      // 未结束。把它们算进来会让 isRunning 恒为 true（reload 被 SESSION_BUSY
+      // 拒绝、空闲会话不释放、重启后短暂显示 streaming）。
+      || entry.subagents?.some((subagent) => (
+        subagent.background !== true
+        && (subagent.status === "pending" || subagent.status === "running")
+      ))
     ))
     || process.planSteps?.some((step) => step.status === "pending" || step.status === "running")
     || false;
@@ -720,9 +734,13 @@ export const normalizeAssistantProcessTerminalState = (
               }
             : {}),
           subagents: entry.subagents?.map((subagent) => (
-            subagent.status === "pending" || subagent.status === "running"
-              ? { ...subagent, status: finalState }
-              : subagent
+            // 后台子任务是独立生命周期：主回合收尾不代表它们结束了。
+            // 这里如果一起改成 completed，监视窗和停止按钮会在主回合结束时消失。
+            subagent.background === true
+              ? subagent
+              : subagent.status === "pending" || subagent.status === "running"
+                ? { ...subagent, status: finalState }
+                : subagent
           )),
         };
       }),
@@ -1118,11 +1136,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const msg = msgs[index];
       if (!msg.process) return msgs;
 
+      // 已封口的消息不应因为后台任务的进度更新而重新变回 running：
+      // hasOpenAssistantProcessState 会把整轮当成未结束，导致 isRunning 恒真、
+      // reload 被 SESSION_BUSY 拒、backend_idle 重复发完成通知。
+      // 监视窗仍能从 subagents（background 豁免）看到运行中状态。
+      const sealed = isFiniteTimestamp(msg.process.endedAt);
+      const { state: patchState, phase: patchPhase, ...restPatch } = patch;
+      const effectivePatch = sealed && (patchState === "running" || patchPhase === "started")
+        ? restPatch
+        : patch;
+
       const entries = msg.process.entries.map((entry) => entry.id === entryId
         ? {
             ...entry,
-            ...patch,
-            subagents: mergeProcessEntrySubagents(entry.subagents, patch.subagents),
+            ...effectivePatch,
+            subagents: mergeProcessEntrySubagents(entry.subagents, effectivePatch.subagents),
           }
         : entry
       );
@@ -1182,12 +1210,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }),
 
-  updateLastAssistantProcessMeta: (patch, sessionId) =>
+  updateLastAssistantProcessMeta: (patch, sessionId, options) =>
     set((s) => {
       return updateSessionMessages(s, sessionId, (messages) => {
-      const msgs = [...messages];
-      const index = findLastAssistantIndex(msgs);
-      if (index < 0) return msgs;
+      // createIfMissing: false 用于后台任务/空闲态事件：只能挂到已有的回合上。
+      // 为了让计划有地方放而凭空新建一条助手消息，会变成一条只有计划条的空气泡。
+      if (options?.createIfMissing === false) {
+        let index = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if (messages[i].role === "assistant" && messages[i].process) {
+            index = i;
+            break;
+          }
+        }
+        if (index < 0) return messages;
+        const msg = messages[index];
+        const process = msg.process;
+        if (!process) return messages;
+        const msgs = messages.slice();
+        msgs[index] = {
+          ...msg,
+          process: {
+            ...process,
+            ...patch,
+          },
+        };
+        return msgs;
+      }
+      // 和 appendLastAssistantProcessEntry 用同一个「当前回合落点」逻辑：
+      // 压缩会把上一段对话封口，单纯写 findLastAssistantIndex 会把计划状态
+      // 写到分隔线上方已经结束的消息里。
+      const { msgs, index } = ensureAssistantProcess(messages, Date.now(), getTurnModelSnapshot(s));
 
       const msg = msgs[index];
       if (!msg.process) return msgs;

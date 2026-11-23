@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow, dialog, app, type OpenDialogOptions, type SaveDialogOptions } from "electron";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join } from "path";
 import { getAgentPluginRegistry } from "./agent-plugin-registry";
 import { ContextCompactionController } from "./context-compaction-controller";
 import {
@@ -219,11 +219,20 @@ function mcpAgentContext(): McpConfigAgentContext {
  */
 const PI_AGENT_ID = "pi";
 
+/**
+ * settings.json 的唯一路径口径。
+ *
+ * 必须和 `store:save`（渲染层设置读写）与 `agent-config.ts` 指向同一个文件：
+ * 它们都按 `userData/hpp-data` 算，不再看 `HPP_DATA_DIR`。用环境变量拼路径会
+ * 在自定义数据目录时变成「写 A 读 B」，而且完全静默。
+ */
+function getSettingsJsonPath(): string {
+  return join(app.getPath("userData"), "hpp-data", "settings.json");
+}
+
 async function loadSavedAgentSubagentConfig(agentId: string): Promise<AgentSubagentConfig | undefined> {
   try {
-    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
-    const settingsPath = join(dataDir, "settings.json");
-    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { subagentConfigs?: unknown };
+    const settings = JSON.parse(await readFile(getSettingsJsonPath(), "utf8")) as { subagentConfigs?: unknown };
     if (!isRecord(settings.subagentConfigs) || !isRecord(settings.subagentConfigs[agentId])) return undefined;
     return normalizeAgentSubagentConfig(settings.subagentConfigs[agentId]);
   } catch {
@@ -233,9 +242,7 @@ async function loadSavedAgentSubagentConfig(agentId: string): Promise<AgentSubag
 
 async function loadSavedAgentCompactionConfig(agentId: string): Promise<AgentCompactionConfig | undefined> {
   try {
-    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
-    const settingsPath = join(dataDir, "settings.json");
-    const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+    const settings = JSON.parse(await readFile(getSettingsJsonPath(), "utf8")) as {
       general?: {
         agentCompaction?: unknown;
         agentCompactionByAgent?: unknown;
@@ -264,25 +271,31 @@ interface SavedCompactionThresholds {
 
 async function loadSavedCompactionThresholds(): Promise<SavedCompactionThresholds> {
   try {
-    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
-    const settingsPath = join(dataDir, "settings.json");
-    const settings = JSON.parse((await readFile(settingsPath, "utf8")).replace(/^\uFEFF/, "")) as {
-      general?: {
-        contextCompactionThresholds?: unknown;
-        contextCompactionThreshold?: unknown;
-        contextCompactionTiers?: unknown;
+    // 读也要排进 settings 写队列：写入是「先截断再写」，并发读可能读到半截 JSON，
+    // 解析失败会把这个用户配过的阈值全部丢掉 —— 表现是全部退回默认 100%，
+    // 自动压缩静默失效，而且没有任何提示。
+    return await queueNamedWrite("settings", async () => {
+      // 与渲染层设置读写共用同一份 settings.json：写在别处等于「拖完就变回默认值」。
+      const settings = JSON.parse(
+        (await readFile(getSettingsJsonPath(), "utf8")).replace(/^\uFEFF/, ""),
+      ) as {
+        general?: {
+          contextCompactionThresholds?: unknown;
+          contextCompactionThreshold?: unknown;
+          contextCompactionTiers?: unknown;
+        };
       };
-    };
-    const general = settings.general;
-    const legacyTiers = general?.contextCompactionTiers;
-    return {
-      thresholds: normalizeContextCompactionThresholdMap(general?.contextCompactionThresholds),
-      legacyDefault: general?.contextCompactionThreshold !== undefined
-        ? general.contextCompactionThreshold
-        : Array.isArray(legacyTiers) && legacyTiers.length > 0
-          ? legacyTiers[0]
-          : undefined,
-    };
+      const general = settings.general;
+      const legacyTiers = general?.contextCompactionTiers;
+      return {
+        thresholds: normalizeContextCompactionThresholdMap(general?.contextCompactionThresholds),
+        legacyDefault: general?.contextCompactionThreshold !== undefined
+          ? general.contextCompactionThreshold
+          : Array.isArray(legacyTiers) && legacyTiers.length > 0
+            ? legacyTiers[0]
+            : undefined,
+      };
+    });
   } catch {
     return { thresholds: {} };
   }
@@ -297,8 +310,8 @@ async function loadSavedCompactionThresholds(): Promise<SavedCompactionThreshold
  */
 async function persistCompactionThreshold(key: string, percent: number): Promise<void> {
   await queueNamedWrite("settings", async () => {
-    const dataDir = process.env.HPP_DATA_DIR || join(app.getPath("userData"), "hpp-data");
-    const settingsPath = join(dataDir, "settings.json");
+    const settingsPath = getSettingsJsonPath();
+    const dataDir = dirname(settingsPath);
     let settings: Record<string, unknown> = {};
     try {
       const parsed = JSON.parse((await readFile(settingsPath, "utf8")).replace(/^\uFEFF/, ""));
@@ -368,7 +381,9 @@ export class AgentManager {
   private readonly compactionController = new ContextCompactionController({
     getBackend: (sessionId) => this.sessionAgents.get(sessionId),
     onError: (sessionId, message) => {
-      console.warn(`[agent-manager] ${sessionId}: ${message}`);
+      // message 是纯原因（如 SESSION_BUSY）：界面会加「上下文压缩失败：」前缀，
+      // 日志这边补上前缀便于检索。
+      console.warn(`[agent-manager] ${sessionId}: 自动压缩失败：${message}`);
       this.window?.webContents.send("agent:event", {
         type: "auto_compaction_failed",
         sessionId,
@@ -805,7 +820,9 @@ export class AgentManager {
     // 控制器在 model_changed / agent_init 时会清掉旧状态（含会话阈值），
     // 这里按已知模型重新解析一次，避免退回缺省阈值误触发。
     if (event.type === "model_changed") {
-      const model = readContextCompactionModel(event.model);
+      // 有的后端换模型时只发一个裸事件、不带 model：这时沿用已知模型，
+      // 别把会话阈值清掉后退回缺省值（表现是自动压缩突然不再触发）。
+      const model = readContextCompactionModel(event.model) ?? this.sessionModels.get(sessionId);
       // 先让控制器处理 model_changed（它会清掉旧状态），再按新模型设置阈值。
       if (model) this.applySessionModel(sessionId, model);
       return;
@@ -1011,6 +1028,16 @@ export class AgentManager {
       const revision = clearPendingUIEvents(targetSessionId);
       this.publishPendingUIRevision(targetSessionId, revision);
     }
+  }
+
+  /** 停止单个后台子任务；后端不支持时返回 stopped:false，不抛错。 */
+  async stopSubagent(sessionId: string | undefined, taskId: string): Promise<{ stopped: boolean; error?: string }> {
+    const agent = sessionId ? this.getAgentBySessionId(sessionId) : this.getActiveAgent();
+    if (!agent) return { stopped: false, error: "No active agent" };
+    if (typeof agent.stopSubagent !== "function") {
+      return { stopped: false, error: "Agent does not support stopping subagents" };
+    }
+    return { stopped: await agent.stopSubagent(taskId) };
   }
 
   async sendGuidance(sessionId: string | undefined, message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<{ guidanceId?: string }> {
@@ -2369,6 +2396,15 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (!agent) return { success: false };
     await agentManager.abort(sessionId);
     return { success: true };
+  });
+
+  ipcMain.handle("agent:stopSubagent", async (_event, sessionId: string | undefined, taskId: string) => {
+    try {
+      const result = await agentManager.stopSubagent(sessionId, taskId);
+      return { success: true, ...result };
+    } catch (err: unknown) {
+      return { success: false, stopped: false, error: getErrorMessage(err) };
+    }
   });
 
   ipcMain.handle("agent:getModels", async (_event, sessionId?: string, agentIdHint?: string) => {

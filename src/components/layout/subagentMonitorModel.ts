@@ -17,7 +17,7 @@ const isActiveStatus = (subagent: AgentSubagent) =>
  * 收集当前会话里仍在运行的子任务。同一子任务会随进度反复更新，
  * 以最后出现的进程条目为准（Map 覆盖即最新）。
  */
-export const collectRunningSubagents = (messages: ChatMessage[]): MonitoredSubagent[] => {
+export const collectSubagents = (messages: ChatMessage[]): MonitoredSubagent[] => {
   const byId = new Map<string, MonitoredSubagent>();
   for (const message of messages) {
     const entries = message.process?.entries;
@@ -29,7 +29,53 @@ export const collectRunningSubagents = (messages: ChatMessage[]): MonitoredSubag
       }
     }
   }
-  return [...byId.values()].filter(isActiveStatus);
+  return [...byId.values()];
+};
+
+export const collectRunningSubagents = (messages: ChatMessage[]): MonitoredSubagent[] => (
+  collectSubagents(messages).filter(isActiveStatus)
+);
+
+export type SubagentModelCost = {
+  model: string;
+  tasks: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  cost: number;
+};
+
+/**
+ * 按模型汇总本会话子任务的消耗。后台派发常跨模型，用户需要一眼看出
+ * 「挑了哪个模型、花了多少」，而不是逐个任务点开算。
+ */
+export const summarizeSubagentCosts = (subagents: MonitoredSubagent[]): SubagentModelCost[] => {
+  const byModel = new Map<string, SubagentModelCost>();
+  for (const subagent of subagents) {
+    if (!subagent.usage) continue;
+    const model = subagent.model?.trim() || "未知模型";
+    const entry = byModel.get(model) || {
+      model,
+      tasks: 0,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      outputTokens: 0,
+      cost: 0,
+    };
+    entry.tasks += 1;
+    entry.inputTokens += subagent.usage.inputTokens ?? 0;
+    entry.cacheReadTokens += subagent.usage.cacheReadTokens ?? 0;
+    entry.outputTokens += subagent.usage.outputTokens ?? 0;
+    entry.cost += subagent.usage.cost ?? 0;
+    byModel.set(model, entry);
+  }
+  return [...byModel.values()].sort((left, right) => right.cost - left.cost || right.tasks - left.tasks);
+};
+
+export const formatSubagentCost = (cost: number): string => {
+  if (!Number.isFinite(cost) || cost <= 0) return "";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
 };
 
 /** 紧凑计数：1.2k / 3.4M。 */
@@ -103,11 +149,14 @@ export const getSubagentIdleMs = (subagent: AgentSubagent, now: number): number 
 
 /** 超过这个时长没有任何活动就按"可能卡住"提示，别再让用户以为它在正常跑。 */
 export const SUBAGENT_STALL_MS = 2 * 60 * 1000;
+/** 后台任务更宽松：长推理和大文件读取期间可能很久没有新事件。 */
+export const BACKGROUND_SUBAGENT_STALL_MS = 10 * 60 * 1000;
 
 export const isSubagentStalled = (subagent: AgentSubagent, now: number): boolean => {
   if (subagent.status !== "running") return false;
   const idle = getSubagentIdleMs(subagent, now);
-  return idle !== undefined && idle >= SUBAGENT_STALL_MS;
+  const threshold = subagent.background ? BACKGROUND_SUBAGENT_STALL_MS : SUBAGENT_STALL_MS;
+  return idle !== undefined && idle >= threshold;
 };
 
 export const formatIdleAgo = (ms: number): string => {

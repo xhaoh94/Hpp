@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useChatStore } from "./chat-store";
+import { hasOpenAssistantProcessState, useChatStore } from "./chat-store";
 
 describe("chat process entry defaults", () => {
   beforeEach(() => {
@@ -222,6 +222,150 @@ describe("chat process entry defaults", () => {
     entries = useChatStore.getState().messages[0].process?.entries || [];
     expect(entries.flatMap((entry) => entry.subagents || []).map((subagent) => subagent.status))
       .toEqual(["completed", "completed"]);
+  });
+
+  it("does not treat running background subagents as an open assistant turn", () => {
+    const message = (backgroundStatus: "running" | "completed") => ({
+      id: "assistant-1",
+      role: "assistant" as const,
+      content: "",
+      timestamp: 1,
+      isStreaming: false,
+      process: {
+        startedAt: 1,
+        endedAt: 2,
+        entries: [{
+          id: "call-bg",
+          type: "subagent" as const,
+          title: "后台任务",
+          timestamp: 1,
+          state: "completed" as const,
+          subagents: [{
+            id: "sa_1:1",
+            label: "后台",
+            status: backgroundStatus,
+            background: true,
+            taskId: "sa_1",
+          }],
+        }],
+      },
+    });
+
+    expect(hasOpenAssistantProcessState(message("running") as never)).toBe(false);
+    // 前台子任务仍然属于未结束的回合。
+    const foreground = message("running");
+    foreground.process.entries[0].subagents[0].background = false as never;
+    expect(hasOpenAssistantProcessState(foreground as never)).toBe(true);
+  });
+
+  it("writes plan meta to the current open assistant process after compaction", () => {
+    useChatStore.setState({
+      messages: [{
+        id: "sealed",
+        role: "assistant",
+        content: "压缩前",
+        timestamp: 1,
+        isStreaming: false,
+        process: { startedAt: 1, endedAt: 2, entries: [] },
+      }],
+      sessionMessages: {},
+      activeSessionId: null,
+    });
+
+    useChatStore.getState().updateLastAssistantProcessMeta({
+      planSteps: [{ id: "1", title: "继续", status: "running" }],
+    });
+
+    const messages = useChatStore.getState().messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[0].process?.planSteps).toBeUndefined();
+    expect(messages[1].isStreaming).toBe(true);
+    expect(messages[1].process?.planSteps).toEqual([{ id: "1", title: "继续", status: "running" }]);
+  });
+
+  it("can explicitly clear plan steps", () => {
+    useChatStore.getState().appendLastAssistantProcessEntry({
+      id: "step-entry",
+      type: "status",
+      title: "步骤",
+      timestamp: 1,
+    });
+    useChatStore.getState().updateLastAssistantProcessMeta({
+      planSteps: [{ id: "1", title: "任务", status: "running" }],
+    });
+    useChatStore.getState().updateLastAssistantProcessMeta({ planSteps: [] });
+    expect(useChatStore.getState().messages[0].process?.planSteps).toEqual([]);
+  });
+
+  it("keeps background subagents running when the parent process ends", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "spawn-bg",
+      type: "subagent",
+      title: "已开始工作",
+      timestamp: 1,
+      state: "running",
+      subagents: [
+        { id: "sa_1:1", label: "后台", status: "running", background: true, taskId: "sa_1" },
+        { id: "call-1:1", label: "前台", status: "running" },
+      ],
+    });
+
+    store.finishLastAssistantProcess(3, "completed");
+
+    const entries = useChatStore.getState().messages[0].process?.entries || [];
+    expect(entries[0].subagents?.map((subagent) => subagent.status)).toEqual(["running", "completed"]);
+  });
+
+  it("空闲态更新计划时不新建助手消息", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "plan-entry",
+      type: "status",
+      title: "步骤",
+      timestamp: 1,
+      state: "completed",
+    });
+    store.finishLastAssistantProcess(3, "completed");
+    const before = useChatStore.getState().messages.length;
+
+    // 后台任务在主回合结束后改计划：只能写回既有消息，不能为了放计划
+    // 新建一条只有计划条的空气泡。
+    store.updateLastAssistantProcessMeta({
+      planSteps: [{ id: "1", title: "旧任务", status: "pending" }],
+      planStepsSource: "native",
+    }, undefined, { createIfMissing: false });
+
+    const messages = useChatStore.getState().messages;
+    expect(messages).toHaveLength(before);
+    expect(messages[0].process?.planSteps).toEqual([{ id: "1", title: "旧任务", status: "pending" }]);
+  });
+
+  it("已封口消息的后台进度不会把条目改回 running", () => {
+    const store = useChatStore.getState();
+    store.appendLastAssistantProcessEntry({
+      id: "bg-entry",
+      type: "subagent",
+      title: "后台",
+      timestamp: 1,
+      state: "completed",
+      subagents: [{ id: "sa_1:1", label: "后台", status: "completed", background: true, taskId: "sa_1" }],
+    });
+    store.finishLastAssistantProcess(3, "completed");
+
+    store.updateLastAssistantProcessEntry("bg-entry", {
+      state: "running",
+      phase: "started",
+      subagents: [{ id: "sa_1:1", label: "后台", status: "running", background: true, taskId: "sa_1" }],
+    });
+
+    const message = useChatStore.getState().messages[0];
+    const entry = message.process?.entries[0];
+    // 条目不回退成 running，但子任务自己的 running 状态照常更新。
+    expect(entry?.state).toBe("completed");
+    expect(entry?.phase).toBeUndefined();
+    expect(entry?.subagents?.[0].status).toBe("running");
+    expect(hasOpenAssistantProcessState(message)).toBe(false);
   });
 
   it("merges partial subagent updates that share one lifecycle id", () => {

@@ -350,14 +350,14 @@ export function createAgentEventController({
     }, sessionId);
   };
 
-  const updateProcessPlanSteps = (sessionId: string, steps: AgentProcessStep[], native = true) => {
-    if (steps.length === 0) return;
+  const updateProcessPlanSteps = (sessionId: string, steps: AgentProcessStep[], native = true, options?: { createIfMissing?: boolean }) => {
+    // 空数组是「显式清空计划」；调用方只在真的有快照时才传进来。
     const runtime = getRuntime(sessionId);
     if (native) runtime.nativePlanSteps = true;
     useChatStore.getState().updateLastAssistantProcessMeta({
       planSteps: steps,
       planStepsSource: native ? "native" : "inferred",
-    }, sessionId);
+    }, sessionId, options);
   };
 
   const updateInferredPlanSteps = (sessionId: string, signal: InferredStepSignal) => {

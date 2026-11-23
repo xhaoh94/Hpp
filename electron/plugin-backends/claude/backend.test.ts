@@ -190,6 +190,58 @@ describe("ClaudeSDKAgent busy lifecycle", () => {
     expect(events.map((event) => event.type)).toEqual(["stream_end", "agent_end"]);
   });
 
+  it("forwards the worker's per-response usage while the turn is still running", () => {
+    const events: Record<string, unknown>[] = [];
+    const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));
+    Object.assign(mutable(agent), {
+      activePromptId: "prompt-live",
+      turnActive: true,
+    });
+
+    mutable(agent).handleWorkerMessage({
+      type: "token_usage",
+      inputTokens: 140,
+      outputTokens: 10,
+      cacheInputTokens: 40,
+      contextTokens: 140,
+      contextPrecision: "estimated",
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      inputTokens: 140,
+      outputTokens: 10,
+      cacheInputTokens: 40,
+      contextTokens: 140,
+      contextPrecision: "estimated",
+    }));
+  });
+
+  it("uses the worker's measured context size for the turn-end reading", () => {
+    const events: Record<string, unknown>[] = [];
+    const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));
+    Object.assign(mutable(agent), {
+      activePromptId: "prompt-usage",
+      turnActive: true,
+    });
+
+    mutable(agent).handleWorkerMessage({
+      type: "prompt_done",
+      id: "prompt-usage",
+      usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0 },
+      // 整回合输入之和是 440，真正的上下文只有最后一条响应的 200。
+      contextTokens: 200,
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "token_usage",
+      inputTokens: 100,
+      outputTokens: 20,
+      contextTokens: 200,
+      contextPrecision: "estimated",
+    }));
+  });
+
   it("maps the worker's precise context usage without double counting turn tokens", () => {
     const events: Record<string, unknown>[] = [];
     const agent = new ClaudeSDKAgent("session-one", (event) => events.push(event));

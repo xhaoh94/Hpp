@@ -237,6 +237,71 @@
   opacity: 0.85;
 }
 
+.subagent-monitor-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 45%, transparent);
+  border-radius: 999px;
+  color: var(--accent-color);
+  font-size: 10px;
+  line-height: 15px;
+  opacity: 0.95;
+}
+
+.subagent-monitor-stop {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.subagent-monitor-stop:hover {
+  border-color: var(--danger-color, #e5484d);
+  color: var(--danger-color, #e5484d);
+}
+
+.subagent-monitor-costs {
+  flex: 0 0 auto;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.subagent-monitor-costs-title {
+  display: block;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+.subagent-monitor-costs-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 18px;
+}
+
+.subagent-monitor-costs-model {
+  flex: 0 1 auto;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.subagent-monitor-costs-tokens {
+  flex: 1 1 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .subagent-monitor-usage {
   color: var(--text-secondary);
   font-size: 11px;
@@ -329,4 +394,15 @@
   .subagent-monitor-panel {
     width: calc(100vw - 24px);
   }
+}
+
+/* 停止子任务失败时的一次性提示：不要让按钮看起来点了没反应。 */
+.subagent-monitor-notice {
+  margin: 0 12px 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--destructive, #ef4444) 12%, transparent);
+  color: var(--destructive, #ef4444);
+  font-size: 11px;
+  line-height: 1.4;
 }

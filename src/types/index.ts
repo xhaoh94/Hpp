@@ -599,6 +599,8 @@ export interface ElectronAPI {
   agentSendGuidance: (message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => Promise<{ success: boolean; error?: string; guidanceId?: string }>;
   agentCancelGuidance?: (sessionId: string | undefined, guidanceId: string) => Promise<{ success: boolean; cancelled?: boolean; reason?: string; error?: string }>;
   agentAbort: (sessionId?: string) => Promise<{ success: boolean }>;
+  /** 停止单个后台子任务（Pi 后台派发）。 */
+  agentStopSubagent?: (sessionId: string | undefined, taskId: string) => Promise<{ success: boolean; stopped?: boolean; error?: string }>;
   agentGetModels: (sessionId?: string, agentId?: string) => Promise<AgentModel[]>;
   agentListActions: (sessionId?: string, options?: AgentActionListOptions) => Promise<AgentActionCatalogEntry[]>;
   agentSetModel: (provider: string, modelId: string, sessionId?: string) => Promise<{ success: boolean; error?: string }>;

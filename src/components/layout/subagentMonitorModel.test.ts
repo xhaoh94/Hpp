@@ -3,8 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentSubagent, ChatMessage } from "@/stores/chat-store";
 import {
+  BACKGROUND_SUBAGENT_STALL_MS,
   collectRunningSubagents,
+  collectSubagents,
   formatIdleAgo,
+  formatSubagentCost,
   formatSubagentModel,
   formatSubagentUsage,
   getSubagentCacheRate,
@@ -12,6 +15,7 @@ import {
   getSubagentIdleMs,
   isSubagentStalled,
   SUBAGENT_STALL_MS,
+  summarizeSubagentCosts,
 } from "./subagentMonitorModel";
 
 const subagent = (overrides: Partial<AgentSubagent> = {}): AgentSubagent => ({
@@ -215,13 +219,13 @@ describe("subagent monitor panel layout", () => {
   it("shows the concrete task title instead of the fixed agent label", () => {
     const monitor = readFileSync(resolve(process.cwd(), "src/components/layout/SubagentMonitor.tsx"), "utf8");
     const block = readFileSync(resolve(process.cwd(), "src/components/layout/ProcessBlock.tsx"), "utf8");
-    // 页签 + 详情头 + 聊天胶囊三处都用 prompt 派生的标题，label 退到 title 提示。
+    // 页签 + 详情头 + 聊天胶囊三处都用同一个标题出口（title 也要压缩），label 退到 title 提示。
     expect(monitor).toContain('className="subagent-monitor-item-label" title={subagent.label}');
-    expect(monitor).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
-    expect(monitor).toContain("{selected.title || getSubagentTitle(selected.prompt, selected.label)}");
-    expect(block).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
+    expect(monitor).toContain("{getSubagentDisplayTitle(subagent)}");
+    expect(monitor).toContain("{getSubagentDisplayTitle(selected)}");
+    expect(block).toContain("{getSubagentDisplayTitle(subagent)}");
     expect(block).toContain("subagent.label,\n  formatSubagentStatusLabel(subagent.status, subagent.stopReason),");
-    // 胶囊的原生 title 不再塞 message：长输出是 markdown，交给悬停卡渲染，
+    // 胶囊的原生 title 不塞 message：长输出走点击展开（markdown 渲染），
     // 塞回 title 就会退回「一大坨源码」的系统 tooltip。
     expect(block).not.toContain("subagent.message,\n].filter(Boolean)");
   });
@@ -237,5 +241,42 @@ describe("subagent monitor panel layout", () => {
     // 没有 scroll/resize 关闭逻辑（详情区要能滚）。
     expect(monitor).not.toContain('window.addEventListener("scroll"');
     expect(monitor).not.toContain('window.addEventListener("resize"');
+  });
+
+  it("后台任务按模型汇总消耗", () => {
+    const all = collectSubagents([
+      message("m1", [
+        subagent({ id: "a", model: "pool/fast", status: "completed", usage: { inputTokens: 100, cacheReadTokens: 40, outputTokens: 20, cost: 0.001 } }),
+        subagent({ id: "b", model: "pool/fast", status: "completed", usage: { inputTokens: 50, cacheReadTokens: 0, outputTokens: 10, cost: 0.002 } }),
+        subagent({ id: "c", model: "pool/deep", status: "completed", usage: { inputTokens: 10, outputTokens: 5, cost: 0.02 } }),
+      ]),
+    ]);
+    const costs = summarizeSubagentCosts(all);
+    expect(costs[0]).toMatchObject({
+      model: "pool/deep",
+      tasks: 1,
+      inputTokens: 10,
+      outputTokens: 5,
+      cost: 0.02,
+    });
+    expect(costs[1]).toMatchObject({
+      model: "pool/fast",
+      tasks: 2,
+      inputTokens: 150,
+      cacheReadTokens: 40,
+      outputTokens: 30,
+      cost: 0.003,
+    });
+    expect(formatSubagentCost(0.003)).toBe("$0.0030");
+    expect(formatSubagentCost(1.234)).toBe("$1.23");
+    expect(formatSubagentCost(0)).toBe("");
+  });
+
+  it("后台任务的停滞阈值放宽到 10 分钟", () => {
+    const background = subagent({ status: "running", background: true, startedAt: 1, lastActivityAt: 1 });
+    expect(isSubagentStalled(background, SUBAGENT_STALL_MS + 1)).toBe(false);
+    expect(isSubagentStalled(background, BACKGROUND_SUBAGENT_STALL_MS + 1)).toBe(true);
+    const foreground = subagent({ status: "running", startedAt: 1, lastActivityAt: 1 });
+    expect(isSubagentStalled(foreground, SUBAGENT_STALL_MS + 1)).toBe(true);
   });
 });

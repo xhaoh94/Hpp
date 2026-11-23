@@ -5,13 +5,18 @@ import { useChatStore, type ChatMessage } from "@/stores/chat-store";
 import { SUBAGENT_MONITOR_OPEN_EVENT } from "@/lib/app-events";
 import {
   collectRunningSubagents,
+  collectSubagents,
   formatIdleAgo,
+  formatSubagentCost,
+  formatSubagentTokenCount,
   formatSubagentUsage,
   getSubagentIdleMs,
   isSubagentStalled,
+  summarizeSubagentCosts,
   type MonitoredSubagent,
+  type SubagentModelCost,
 } from "./subagentMonitorModel";
-import { getSubagentTitle } from "./processBlockUtils";
+import { getSubagentDisplayTitle } from "./processBlockUtils";
 import { MarkdownRenderer } from "@/components/shared/MarkdownRenderer";
 import "./SubagentMonitor.css";
 
@@ -33,6 +38,10 @@ type SubagentMonitorViewProps = {
   onToggle: () => void;
   onClose: () => void;
   onSelect: (id: string) => void;
+  onStop?: (subagent: MonitoredSubagent) => void;
+  costs?: SubagentModelCost[];
+  /** 停止失败等一次性提示；成功时由调用方清空。 */
+  notice?: string | null;
 };
 
 /** 纯展示层：不读 store，便于直接渲染测试。 */
@@ -44,6 +53,9 @@ export function SubagentMonitorView({
   onToggle,
   onClose,
   onSelect,
+  onStop,
+  costs = [],
+  notice = null,
 }: SubagentMonitorViewProps) {
   const selected = subagents.find((subagent) => subagent.id === selectedId) || subagents[0];
   const outputRef = useRef<HTMLDivElement | null>(null);
@@ -118,6 +130,10 @@ export function SubagentMonitorView({
             </button>
           </div>
 
+          {notice && (
+            <div className="subagent-monitor-notice" role="status">{notice}</div>
+          )}
+
           <div className="subagent-monitor-body">
             <ul className="subagent-monitor-list">
               {subagents.map((subagent) => {
@@ -132,8 +148,11 @@ export function SubagentMonitorView({
                       <span className={`subagent-monitor-dot ${itemStalled ? "stalled" : subagent.status || ""}`} />
                       {/* 页签显示任务标题（prompt 首句），身份标签 Scout/Worker 放 tooltip。 */}
                       <span className="subagent-monitor-item-label" title={subagent.label}>
-                        {subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}
+                        {getSubagentDisplayTitle(subagent)}
                       </span>
+                      {subagent.background && (
+                        <span className="subagent-monitor-badge" title="后台任务：主回合结束后仍继续运行">后台</span>
+                      )}
                     </button>
                   </li>
                 );
@@ -143,13 +162,29 @@ export function SubagentMonitorView({
             <div className="subagent-monitor-detail">
               {/* 固定头：标题 / 状态 / 模型 / 消耗 / 最后活动。内容再长也不滚出视野。 */}
               <div className="subagent-monitor-detail-head">
-                <strong title={selected.label}>{selected.title || getSubagentTitle(selected.prompt, selected.label)}</strong>
+                <strong title={selected.label}>{getSubagentDisplayTitle(selected)}</strong>
                 <span>{STATUS_TEXT[selected.status || ""] || selected.status}</span>
                 {selected.model && <span className="subagent-monitor-model">{selected.model}</span>}
+                {selected.background && (
+                  <span className="subagent-monitor-badge" title="后台任务：主回合结束后仍继续运行">后台</span>
+                )}
+                {onStop && selected.taskId && (selected.status === "running" || selected.status === "pending") && (
+                  <button
+                    type="button"
+                    className="subagent-monitor-stop"
+                    onClick={() => onStop(selected)}
+                    title="停止这个子任务（不影响主会话）"
+                  >
+                    停止
+                  </button>
+                )}
               </div>
               <div className="subagent-monitor-detail-meta">
                 {formatSubagentUsage(selected.usage) && (
                   <span className="subagent-monitor-usage">{formatSubagentUsage(selected.usage)}</span>
+                )}
+                {selected.rounds && selected.rounds > 1 && (
+                  <span className="subagent-monitor-usage">共 {selected.rounds} 轮对话</span>
                 )}
                 {idle !== undefined && (
                   <span className={`subagent-monitor-idle ${stalled ? "stalled" : ""}`}>
@@ -188,6 +223,26 @@ export function SubagentMonitorView({
               </div>
             </div>
           </div>
+
+          {costs.length > 0 && (
+            <div className="subagent-monitor-costs">
+              <span className="subagent-monitor-costs-title">按模型汇总（本会话子任务）</span>
+              {costs.map((item) => (
+                <div className="subagent-monitor-costs-row" key={item.model}>
+                  <span className="subagent-monitor-costs-model" title={item.model}>{item.model}</span>
+                  <span className="subagent-monitor-costs-tokens">
+                    {[
+                      `入 ${formatSubagentTokenCount(item.inputTokens) || 0}`,
+                      item.cacheReadTokens > 0 ? `缓存 ${formatSubagentTokenCount(item.cacheReadTokens)}` : "",
+                      `出 ${formatSubagentTokenCount(item.outputTokens) || 0}`,
+                      item.tasks > 1 ? `${item.tasks} 个任务` : "",
+                      formatSubagentCost(item.cost),
+                    ].filter(Boolean).join(" · ")}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </>
@@ -207,9 +262,12 @@ export function SubagentMonitor({ sessionId }: { sessionId: string | null }) {
     return state.sessionMessages[sessionId] || EMPTY_MESSAGES;
   });
   const running = useMemo(() => collectRunningSubagents(messages), [messages]);
+  const allSubagents = useMemo(() => collectSubagents(messages), [messages]);
+  const costs = useMemo(() => summarizeSubagentCosts(allSubagents), [allSubagents]);
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [stopNotice, setStopNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (running.length === 0) return;
@@ -254,6 +312,29 @@ export function SubagentMonitor({ sessionId }: { sessionId: string | null }) {
       onToggle={() => setOpen((value) => !value)}
       onClose={() => setOpen(false)}
       onSelect={setSelectedId}
+      onStop={async (subagent) => {
+        const taskId = subagent.taskId;
+        if (!taskId || !sessionId) return;
+        setStopNotice(null);
+        try {
+          const result = await window.electronAPI.agentStopSubagent?.(sessionId, taskId);
+          if (!result) {
+            setStopNotice("停止请求未送达：接口不可用。");
+            return;
+          }
+          if (!result.success) {
+            setStopNotice(`停止失败：${result.error || "未知原因"}`);
+            return;
+          }
+          if (result.stopped === false) {
+            setStopNotice("停止请求未生效：任务可能已经结束。");
+          }
+        } catch (error) {
+          setStopNotice(`停止失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }}
+      costs={costs}
+      notice={stopNotice}
     />
   );
 }

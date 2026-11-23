@@ -70,7 +70,19 @@ describe("中断之后的自动压缩", () => {
   });
 
   it("会话关闭 / 运行时重置时清掉计时器", () => {
-    expect(controllerSource).toContain("if (state) this.clearIdleRetry(state);");
-    expect(controllerSource).toContain("for (const state of this.states.values()) this.clearIdleRetry(state);");
+    // 两个计时器都要清：等空闲的重试、以及压缩看门狗。
+    const forgetBody = controllerSource.slice(
+      controllerSource.indexOf("forget(sessionId: string): void"),
+      controllerSource.indexOf("private resetUsage("),
+    );
+    expect(forgetBody).toContain("this.clearIdleRetry(state);");
+    expect(forgetBody).toContain("this.clearCompactionWatchdog(state);");
+
+    const resetBody = controllerSource.slice(
+      controllerSource.indexOf("reset(): void"),
+      controllerSource.indexOf("private getState("),
+    );
+    expect(resetBody).toContain("this.clearIdleRetry(state);");
+    expect(resetBody).toContain("this.clearCompactionWatchdog(state);");
   });
 });

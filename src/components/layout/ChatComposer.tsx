@@ -35,7 +35,7 @@ import {
   type InlineComposerEditorHandle,
 } from "@/components/shared/InlineComposerEditor";
 import type { ComposerDocument } from "@shared/composer-document";
-import { composerDocumentHasContent } from "@shared/composer-document";
+import { composerDocumentHasContent, createComposerDocument } from "@shared/composer-document";
 
 const FILE_MENTION_LIST_ID = "chat-composer-file-mentions";
 const FILE_MENTION_RESULT_LIMIT = 12;
@@ -190,6 +190,17 @@ export const ChatComposer = memo(function ChatComposer({
   const [actionCatalog, setActionCatalog] = useState<AgentActionCatalogEntry[]>([]);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState("");
+  /** 键盘导航高亮项：/ 打开面板后可以直接 ↑↓ + Enter，不必用鼠标。 */
+  const [actionActiveIndex, setActionActiveIndex] = useState(0);
+  /**
+   * 面板是不是由正文里的「/」唤起的。
+   *
+   * `/` 不再被吞掉：先落进正文再弹面板，所以输入框里能看见它。
+   * - 选中技能：把这一格删掉，消息里不留孤零零的斜杠；
+   * - 直接关掉面板：保留 `/`，等同于用户真的输入了一个斜杠。
+   */
+  const slashInsertedRef = useRef(false);
+  const actionListRef = useRef<HTMLDivElement | null>(null);
   const [fileMention, setFileMention] = useState<ActiveFileMention | null>(null);
   const [fileMentionResultState, setFileMentionResultState] = useState<FileMentionResultState>({
     items: [],
@@ -263,6 +274,8 @@ export const ChatComposer = memo(function ChatComposer({
       if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
+        // 点到别处 = 放弃选择：正文里的 / 保留，不再需要选中时清理。
+        slashInsertedRef.current = false;
       }
       if (inputContainerRef.current && !inputContainerRef.current.contains(event.target as Node)) {
         setFileMention(null);
@@ -271,9 +284,15 @@ export const ChatComposer = memo(function ChatComposer({
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
+        const wasPickerOpen = actionPickerOpen;
         setUploadMenuOpen(false);
         setActionPickerOpen(false);
         setFileMention(null);
+        // 关掉面板时正文里的 / 保留：等同于用户输入的就是一个斜杠。
+        if (wasPickerOpen) slashInsertedRef.current = false;
+        // 焦点在面板的搜索框里：关掉后把焦点还给输入框，不然会掉到 body 上，
+        // 用户得再点一次才能继续打字。
+        if (wasPickerOpen) requestAnimationFrame(() => editorRef.current?.focus());
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -289,6 +308,7 @@ export const ChatComposer = memo(function ChatComposer({
       setUploadMenuOpen(false);
       setActionPickerOpen(false);
       setFileMention(null);
+      slashInsertedRef.current = false;
     }
   }, [inputDisabled, isAwaitingUIResponse]);
 
@@ -297,6 +317,7 @@ export const ChatComposer = memo(function ChatComposer({
     setUploadMenuOpen(false);
     setActionPickerOpen(false);
     setActionSearch("");
+    slashInsertedRef.current = false;
     setActionCatalog([]);
     setActionError("");
     setFileMention(null);
@@ -414,6 +435,25 @@ export const ChatComposer = memo(function ChatComposer({
       event.stopPropagation();
     }
 
+    // CLI 习惯：空输入框里输入「/」唤出技能/命令面板。
+    // 不拦默认行为：斜杠是用户输入的一部分，先落进正文，再弹面板。
+    // 只在整段为空时触发 —— 正文里的路径（src/main.ts）、日期（11/23）照常输入。
+    if (
+      event.key === "/"
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+      && !event.shiftKey
+      && actionSupported
+      && !composerDocumentHasContent(composerDocument)
+    ) {
+      slashInsertedRef.current = true;
+      // 面板会自动聚焦搜索框：等这一帧把 / 插进正文再打开，
+      // 否则字符可能落进搜索框。也不阻止冒泡，编辑器照常收键。
+      requestAnimationFrame(() => openActionPicker(true));
+      return;
+    }
+
     // Ctrl/Cmd+Enter（引导发送）由 ChatPanel 处理，@ 文件提及弹窗不能吞掉这个组合键。
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
       onKeyDown(event);
@@ -504,15 +544,37 @@ export const ChatComposer = memo(function ChatComposer({
     }
   };
 
-  const handleChooseAction = () => {
+  const openActionPicker = (fromSlash: boolean) => {
     if (interactionDisabled || !actionSupported) return;
+    // 面板已经开着（例如 / 打开后又点了「技能」按钮）：保持原来的触发来源，
+    // 否则会把「选中后清斜杠」这件事丢掉，正文里会剩一个孤零零的 /。
+    if (!fromSlash && actionPickerOpen) return;
     setFileMention(null);
     setUploadMenuOpen(false);
+    // 只有「/ 触发」才需要在选中时清掉正文里的那一格；按钮打开时正文与面板无关。
+    slashInsertedRef.current = fromSlash;
+    // 每次打开都从空查询开始：上次搜过 "test" 时，这次按 / 不该只剩一条结果。
+    setActionSearch("");
+    setActionActiveIndex(0);
     setActionPickerOpen(true);
     void loadActions(false);
   };
 
+  const handleChooseAction = () => openActionPicker(false);
+
+  /** 面板由 `/` 唤起时，把正文里那一格斜杠删掉（只在文档确实只剩它时动手）。 */
+  const clearSlashTrigger = () => {
+    if (!slashInsertedRef.current) return;
+    slashInsertedRef.current = false;
+    const [only] = composerDocument.nodes;
+    if (composerDocument.nodes.length === 1 && only?.type === "text" && only.text === "/") {
+      onDocumentChange(createComposerDocument([]));
+    }
+  };
+
   const handleSelectAction = (entry: AgentActionCatalogEntry) => {
+    // 先清斜杠再挂技能：顺序反过来的话，编辑器重渲染会把技能 chip 顶掉。
+    clearSlashTrigger();
     onSelectAction({ kind: entry.kind, name: entry.name });
     setActionPickerOpen(false);
     setUploadMenuOpen(false);
@@ -527,6 +589,23 @@ export const ChatComposer = memo(function ChatComposer({
   });
   const skillActions = visibleActions.filter((entry) => entry.kind === "skill");
   const commandActions = visibleActions.filter((entry) => entry.kind === "command");
+  /** 键盘导航的扁平顺序，必须和下面的渲染顺序一致：技能在前、命令在后。 */
+  const orderedActions = [...skillActions, ...commandActions];
+
+  // 过滤条件变了就回到第一项；列表变短时把高亮夹回范围内。
+  useEffect(() => setActionActiveIndex(0), [normalizedSearch]);
+  useEffect(() => {
+    setActionActiveIndex((index) => (
+      orderedActions.length === 0 ? 0 : Math.min(index, orderedActions.length - 1)
+    ));
+  }, [orderedActions.length]);
+  // 键盘移动高亮时把它带进可视区（列表可能比面板高）。
+  useEffect(() => {
+    if (!actionPickerOpen) return;
+    actionListRef.current
+      ?.querySelector<HTMLElement>(".chat-action-item.active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [actionActiveIndex, actionPickerOpen]);
 
   return (
     <>
@@ -695,7 +774,18 @@ export const ChatComposer = memo(function ChatComposer({
                     <button type="button" onClick={() => void loadActions(true)} disabled={actionLoading} title="刷新">
                       <RefreshCw size={13} className={actionLoading ? "spin" : undefined} />
                     </button>
-                    <button type="button" onClick={() => setActionPickerOpen(false)} title="关闭"><X size={13} /></button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionPickerOpen(false);
+                        // 与 Esc 一致：正文里的 / 保留，用户继续往后打字即可。
+                        slashInsertedRef.current = false;
+                        requestAnimationFrame(() => editorRef.current?.focus());
+                      }}
+                      title="关闭（保留已输入的 /）"
+                    >
+                      <X size={13} />
+                    </button>
                   </div>
                 </div>
                 <label className="chat-action-search">
@@ -703,11 +793,32 @@ export const ChatComposer = memo(function ChatComposer({
                   <input
                     value={actionSearch}
                     onChange={(event) => setActionSearch(event.target.value)}
+                    onKeyDown={(event) => {
+                      // 中文输入法用 Enter 上屏：那是输入法在提交，不是选中。
+                      if (event.nativeEvent.isComposing) return;
+                      // CLI 习惯：↑↓ 移动、Enter 选中。放在搜索框上，/ 打开后
+                      // 不用把焦点挪来挪去。
+                      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                        event.preventDefault();
+                        if (orderedActions.length === 0) return;
+                        const direction = event.key === "ArrowDown" ? 1 : -1;
+                        setActionActiveIndex((index) => (
+                          (index + direction + orderedActions.length) % orderedActions.length
+                        ));
+                        return;
+                      }
+                      if (event.key === "Enter") {
+                        const entry = orderedActions[actionActiveIndex];
+                        if (!entry) return;
+                        event.preventDefault();
+                        handleSelectAction(entry);
+                      }
+                    }}
                     placeholder="搜索技能或命令"
                     autoFocus
                   />
                 </label>
-                <div className="chat-action-list">
+                <div className="chat-action-list" ref={actionListRef}>
                   {actionLoading && actionCatalog.length === 0 ? (
                     <div className="chat-action-state">正在加载...</div>
                   ) : actionError ? (
@@ -717,13 +828,14 @@ export const ChatComposer = memo(function ChatComposer({
                   ) : (
                     <>
                       {skillActions.length > 0 && <div className="chat-action-group-title">技能</div>}
-                      {skillActions.map((entry) => {
+                      {skillActions.map((entry, index) => {
                         const description = getAgentActionDisplayDescription(agentId, entry);
                         return (
                           <button
                             type="button"
-                            className="chat-action-item"
+                            className={`chat-action-item ${index === actionActiveIndex ? "active" : ""}`}
                             key={`skill:${entry.name}`}
+                            onMouseEnter={() => setActionActiveIndex(index)}
                             onMouseDown={(event) => event.stopPropagation()}
                             onClick={() => handleSelectAction(entry)}
                           >
@@ -733,13 +845,15 @@ export const ChatComposer = memo(function ChatComposer({
                         );
                       })}
                       {commandActions.length > 0 && <div className="chat-action-group-title">命令</div>}
-                      {commandActions.map((entry) => {
+                      {commandActions.map((entry, index) => {
                         const description = getAgentActionDisplayDescription(agentId, entry);
+                        const itemIndex = skillActions.length + index;
                         return (
                           <button
                             type="button"
-                            className="chat-action-item"
+                            className={`chat-action-item ${itemIndex === actionActiveIndex ? "active" : ""}`}
                             key={`command:${entry.name}`}
+                            onMouseEnter={() => setActionActiveIndex(itemIndex)}
                             onMouseDown={(event) => event.stopPropagation()}
                             onClick={() => handleSelectAction(entry)}
                           >
@@ -750,6 +864,9 @@ export const ChatComposer = memo(function ChatComposer({
                       })}
                     </>
                   )}
+                </div>
+                <div className="chat-action-picker-footer">
+                  回车选中后 / 会被替换；直接关闭则保留 / 继续输入
                 </div>
               </div>
             )}

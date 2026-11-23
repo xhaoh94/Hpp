@@ -17,6 +17,8 @@ const requiredFiles = [
   "plan-mode-policy.mjs",
   "subagent-extension.mjs",
   "present-extension.mjs",
+  "todo-extension.mjs",
+  "subagent-worktree.mjs",
   "subagent-bridge-extension.mjs",
   "subagent-policy.mjs",
   "subagent-prompts/implement.md",

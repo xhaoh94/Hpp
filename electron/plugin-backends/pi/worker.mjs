@@ -14,7 +14,21 @@ import {
 import { findBlockedPlanCommand } from "./plan-mode-policy.mjs";
 import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subagent-extension.mjs";
 import { createHppPresentExtension } from "./present-extension.mjs";
+import { createHppTodoExtension, TODO_GUIDANCE, TODO_TOOL_NAME } from "./todo-extension.mjs";
 import { installTransientProviderRetry } from "./transient-provider-retry.mjs";
+
+// stdout 是协议通道（一行一个 JSON）。第三方 Pi 扩展或依赖的 console.log 会
+// 和协议行混在一起，宿主只能当「非协议输出」丢掉，排查非常困难。
+// 把这些日志统一改到 stderr（console.error 本来就是 stderr）。
+for (const method of ["log", "info", "debug", "warn"]) {
+  console[method] = (...args) => {
+    const text = args.map((value) => {
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value); } catch { return String(value); }
+    }).join(" ");
+    try { process.stderr.write(`${text}\n`); } catch { /* ignore */ }
+  };
+}
 
 const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt";
 const DISCOVERY_TOOL_NAMES = ["grep", "find", "ls"];
@@ -23,7 +37,7 @@ const BUILTIN_SUBAGENT_PROMPT_DIR = join(fileURLToPath(new URL(".", import.meta.
 // present_files 只把路径登记给宿主，不读写文件内容；放进只读集合，
 // 否则每次任务收尾都会弹一次权限确认。工作区外的路径仍然走下面的
 // outsideProject 判定，由用户决定。
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "present_files"]);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "present_files", TODO_TOOL_NAME, "subagent_wait", "subagent_stop"]);
 const MUTATING_TOOLS = new Set(["edit", "write"]);
 const PLAN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 // codemode 必须显式拉黑，不能靠「不在只读白名单里」兜底：它在 QuickJS 沙箱里用
@@ -184,11 +198,64 @@ let activePromptId = null;
 let activePermissionMode = "full-access";
 let activePlanMode = false;
 let activeHostSystemPrompt = "";
+// ---- P2b 宿主发起的回合（后台结果自动唤醒） ----
+// 宿主回合的 id 形如 host:<uuid>；它的生命周期与用户 prompt 一样走
+// accepted → agent 事件 → prompt_done，只是没有用户气泡。
+let hostTurnId = null;
+let hostTurnTaskIds = [];
+// 后台结果触发前先记下 taskIds，before_agent_start 里再取走。
+let pendingHostWakeTaskIds = [];
+// 用户主动停止后暂停自动唤醒，直到用户发出下一条消息。
+let autoWakePaused = false;
+// 没有用户输入时连续自动唤醒的次数；达到上限后退回 nextTurn。
+let autoWakeTurnCount = 0;
+let autoWakeLimitNotified = false;
+// 模型切换/压缩期间不唤醒。
+let modelSwitchActive = false;
+const isHostPromptId = (id) => typeof id === "string" && id.startsWith("host:");
+const prepareHostTurn = ({ taskIds } = {}) => {
+  const incoming = Array.isArray(taskIds)
+    ? taskIds.map((value) => String(value || "")).filter(Boolean)
+    : [];
+  // 两批唤醒可能并发（不同任务在同一防抖窗口外先后完成）：合并而不是覆盖，
+  // 否则后一批会把前一批的 task id 冲掉，回执确认匹配不到就只能等超时降级。
+  pendingHostWakeTaskIds = [...new Set([...pendingHostWakeTaskIds, ...incoming])];
+};
+/**
+ * 自动唤醒护栏。返回 false 时，调用方应把结果降级为 nextTurn。
+ * 不含 autoWakeOnResult 开关本身：那是扩展侧的配置。
+ */
+const canAutoWakeNow = () => {
+  if (autoWakePaused) return false;
+  if (activePromptId || agentRunActive) return false;
+  if (activeCompactionId) return false;
+  if (modelSwitchActive) return false;
+  // 有待回答的权限确认/问卷时不要拉起新回合。
+  if ((uiBridge?.pending?.size || 0) > 0) return false;
+  if (pendingSubagentUIRequests.size > 0) return false;
+  const maxTurns = Number(activeSubagentConfig.maxAutoWakeTurns) || 3;
+  if (autoWakeTurnCount >= maxTurns) {
+    if (!autoWakeLimitNotified) {
+      autoWakeLimitNotified = true;
+      send({
+        type: "status",
+        id: `hpp-autowake-limit-${randomUUID()}`,
+        status: "warning",
+        title: "已暂停自动继续",
+        detail: `没有用户输入时，后台任务最多连续自动唤醒 ${maxTurns} 次。发送下一条消息后会恢复。`,
+      });
+    }
+    return false;
+  }
+  return true;
+};
 // 重建 loader 需要的三样东西。做成模块级而不是 init 的局部闭包，
 // 因为 setBuiltinExtensions 要在init 之外复用同一套构造逻辑。
 let activeAgentDir = "";
 let activeShellEnvironmentContract = "";
 let activeHppSubagentExtension = null;
+let activeHppPresentExtension = null;
+let activeHppTodoExtension = null;
 let activeEventBus = null;
 const pendingSubagentUIRequests = new Map();
 
@@ -258,12 +325,8 @@ const dismissSubagentUIRequests = (ownerId, reason = "dismissed") => {
   }
 };
 
-// 缓存了「已入队、还没真正交付给 agent」的引导。
-//
-// 用计数而不是布尔：两条引导连着进来时，布尔会被第一条交付吃掉信号，第二条的
-// 引导气泡就永远等不到确认、队列项一直卡在「等待调度」。Pi 自己的 steer 队列
-// 支持多条，所以这里按条数一一对上。
-let pendingGuidanceDeliveries = 0;
+// 「已入队、还没真正交付给 agent」的引导统一看 queuedGuidances：
+// 它既是 Pi steer 队列的镜像，也是交付事件的来源，不再单独维护计数。
 // 每条引导的入队记录，撤回时要靠它把「剩下的」重新压回 steer 队列。
 // Pi 只提供 clearQueue()（清空全部），没有按条撤回的公开接口。
 let queuedGuidances = [];
@@ -293,8 +356,40 @@ let agentRunActive = false;
 const completedPromptIds = new Set();
 const actionKeys = new Set();
 
+const MAX_WORKER_EVENT_BYTES = 8 * 1024 * 1024;
+/**
+ * 写协议行。任何单条事件都不能弄死 worker：
+ * - 工具结果含 BigInt / 循环引用时 JSON.stringify 会抛错；
+ * - stdout 关闭（宿主退出）会抛 EPIPE。
+ * 两者以前都会走到 uncaughtException → process.exit(1)，连同后台子任务一起被带走。
+ */
 const send = (message) => {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  let serialized;
+  try {
+    serialized = JSON.stringify(message);
+  } catch (error) {
+    try {
+      serialized = JSON.stringify({
+        type: "error",
+        ...(message && typeof message === "object" && message.id !== undefined ? { id: message.id } : {}),
+        error: `Pi worker event is not serializable: ${error?.message || String(error)}`,
+      });
+    } catch {
+      return;
+    }
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_WORKER_EVENT_BYTES) {
+    serialized = JSON.stringify({
+      type: "error",
+      ...(message && typeof message === "object" && message.id !== undefined ? { id: message.id } : {}),
+      error: `Pi worker event exceeds ${MAX_WORKER_EVENT_BYTES} bytes`,
+    });
+  }
+  try {
+    process.stdout.write(`${serialized}\n`);
+  } catch {
+    // 宿主已断开：由 readline close 兜底退出。
+  }
 };
 
 // Pi 1.1.0 的 agent_settled 带 aborted；旧版 SDK 没有这个字段，按「正常结束」处理，
@@ -387,6 +482,38 @@ const forkSessionAtMessage = async (command) => {
     sessionFilePath,
     nativeEntryId: targetEntryId,
   };
+};
+
+/**
+ * P5：给 inheritContext 的子 Agent 生成分叉会话。
+ *
+ * 不能直接 --fork 主会话文件：派发它的助手消息里正挂着这次 subagent 工具调用，
+ * 还没有工具结果。这里只在分支末端确实是「带 subagent 调用的助手消息」时
+ * 退到前一条，避免子 Agent 看到孤立的工具调用。
+ */
+const createInheritedSubagentSession = () => {
+  if (!sdk || !session?.sessionFile) return "";
+  try {
+    const manager = sdk.SessionManager.open(session.sessionFile, undefined, projectPath);
+    const branch = manager.getBranch();
+    const last = branch[branch.length - 1];
+    let targetId = manager.getLeafId?.() || (isRecord(last) ? last.id : "");
+    const hasSubagentCall = isRecord(last)
+      && last.type === "message"
+      && isRecord(last.message)
+      && Array.isArray(last.message.content)
+      && last.message.content.some((part) => (
+        isRecord(part)
+        && ["toolCall", "tool_call", "tool_use"].includes(String(part.type || ""))
+        && [part.name, part.toolName, isRecord(part.tool) ? part.tool.name : ""]
+          .some((name) => normalizeToolName(name) === "subagent")
+      ));
+    if (hasSubagentCall) targetId = branch[branch.length - 2]?.id || targetId;
+    if (!targetId) return "";
+    return manager.createBranchedSession(targetId) || "";
+  } catch {
+    return "";
+  }
 };
 
 const normalizeQuestionOption = (option) => {
@@ -762,6 +889,15 @@ const waitForPromise = (promise, timeoutMs) => new Promise((resolve) => {
 
 const disposeSession = async () => {
   const disposingSession = session;
+  // 先回收后台子 Agent：它们不挂在 Pi session 上，session.dispose() 管不到。
+  try {
+    // backend 侧等 disposed ack 的总预算是 4s + 1.5s 进程退出；这里必须
+    // 明显小于它，否则每次 dispose 都会走到 taskkill /f，Pi 会话收尾被截断。
+    await waitForPromise(activeHppSubagentExtension?.stopAll?.(), 2500);
+  } catch {
+    // 回收失败不能阻断会话释放；进程退出时还有 abortAll 兜底。
+  }
+  activeHppSubagentExtension = null;
   activePromptId = null;
   activePermissionMode = "full-access";
   activePlanMode = false;
@@ -769,6 +905,15 @@ const disposeSession = async () => {
   fullAccessToolNames = [];
   planModeToolNames = [];
   agentRunActive = false;
+  queuedGuidances = [];
+  // 新会话不能继承上一轮的自动唤醒状态（暂停/连续计数/待唤醒 taskIds）。
+  autoWakePaused = false;
+  autoWakeTurnCount = 0;
+  autoWakeLimitNotified = false;
+  hostTurnId = null;
+  hostTurnTaskIds = [];
+  pendingHostWakeTaskIds = [];
+  modelSwitchActive = false;
   completedPromptIds.clear();
   dismissSubagentUIRequests(undefined, "dispose");
   unsubscribe?.();
@@ -783,7 +928,7 @@ const disposeSession = async () => {
     // 会话状态清理时被直接结束，导致下次恢复会话失败。
     try {
       disposingSession.abortCompaction?.();
-      await waitForPromise(disposingSession.abort?.(), 1000);
+      await waitForPromise(disposingSession.abort?.(), 800);
     } catch {
       // dispose() 自身仍会执行兜底中止和资源清理。
     }
@@ -1154,7 +1299,15 @@ const hppCompactionExtension = (pi) => {
     }
     try {
       const currentTarget = await resolveCurrentCompactionTarget(context);
-      const compaction = await runCompactionWithRetry(event, context, currentTarget, config);
+      // 压缩会丢掉细节；把未完成任务拼进摘要指令，压缩后模型仍知道该推进什么。
+      const todoContext = activeHppTodoExtension?.buildUnfinishedContext?.() || "";
+      const customInstructions = [event.customInstructions, todoContext].filter(Boolean).join("\n\n");
+      const compaction = await runCompactionWithRetry(
+        customInstructions ? { ...event, customInstructions } : event,
+        context,
+        currentTarget,
+        config,
+      );
       markCompactionSucceeded();
       return { compaction };
     } catch (error) {
@@ -1175,10 +1328,47 @@ const hppCompactionExtension = (pi) => {
   });
 };
 
+/**
+ * 识别并登记宿主发起的回合。
+ *
+ * Pi 1.5.x 的 before_agent_start 带 messageType；custom 表示由扩展
+ * `sendMessage(..., { triggerTurn: true })` 拉起。旧版 SDK 没有该字段，
+ * 用「此时没有 activePromptId」判定：用户 prompt 会先设置它。
+ */
+const maybeStartHostTurn = (event) => {
+  if (activePromptId) return false;
+  if (activeCompactionId || modelSwitchActive) return false;
+  const messageType = typeof event?.messageType === "string" ? event.messageType : "";
+  if (messageType && messageType !== "custom") return false;
+  // 旧版 SDK 没有 messageType：只有确实准备了唤醒任务才认为是宿主触发，
+  // 避免把其它内部 before_agent_start 误判成新回合。
+  if (!messageType && pendingHostWakeTaskIds.length === 0) return false;
+  const id = `host:${randomUUID()}`;
+  activePromptId = id;
+  hostTurnId = id;
+  hostTurnTaskIds = pendingHostWakeTaskIds;
+  pendingHostWakeTaskIds = [];
+  send({
+    type: "host_turn_started",
+    id,
+    reason: "subagent_result",
+    taskIds: hostTurnTaskIds,
+    clientUserMessageId: `host:${id}`,
+  });
+  // 回执：只有走到这里才能确认 triggerTurn 真的拉起了宿主回合。
+  // 扩展据此停止 8s 兜底计时器；扩展被回滚/重载时这个调用自然失效。
+  try { activeHppSubagentExtension?.confirmHostTurn?.(hostTurnTaskIds); } catch { /* ignore */ }
+  return true;
+};
+
 const hppRuntimePolicyExtension = (pi) => {
   pi.on("before_agent_start", (event) => {
+    maybeStartHostTurn(event);
     const additions = [];
     if (activePlanMode) additions.push(PLAN_MODE_SYSTEM_PROMPT);
+    // 未完成任务随每一轮进入系统提示：压缩只保留摘要时，任务列表仍是最新状态。
+    const todoContext = activeHppTodoExtension?.buildUnfinishedContext?.();
+    if (todoContext) additions.push(todoContext);
     // Keep the language policy last. Pi's base prompt, project context and
     // Plan policy contain substantial English text, so an earlier language
     // hint is too easy for models to mirror over visible reasoning.
@@ -1487,14 +1677,19 @@ const requireSDKFactory = (name) => {
 };
 
 /**
- * 按用户开关构造可选内置扩展的工厂列表。
- * 缺工厂或调用抛错都直接跳过：旧版 SDK 没有这些导出时开关应当静默失效，
- * 而不是让整个会话起不来。
+ * 构造全部可选内置扩展的工厂列表（只创建一次）。
+ *
+ * 1.5+ 的 ResourceLoader 支持 `disabledBuiltinExtensions`：工厂必须全量交给
+ * loader，开关只填 disabled 集合。否则热切换时 packageManager 仍按旧列表
+ * 加载 `builtin:<name>`，会出现重复连接 / 未知 builtin。
+ *
+ * 旧版 SDK 没有这个能力，仍按「只放入启用的工厂」走兼容路径。
  */
-const buildOptionalBuiltinFactories = (config) => {
+let activeBuiltinFactories = null;
+const buildOptionalBuiltinFactories = () => {
+  if (activeBuiltinFactories) return activeBuiltinFactories;
   const factories = [];
   for (const [name, factoryName] of Object.entries(OPTIONAL_BUILTIN_EXTENSIONS)) {
-    if (!config[name]) continue;
     const create = sdk?.[factoryName];
     if (typeof create !== "function") continue;
     try {
@@ -1508,8 +1703,25 @@ const buildOptionalBuiltinFactories = (config) => {
       // 工厂初始化失败（缺依赖、缺 WASM 等）时按「未启用」处理。
     }
   }
+  activeBuiltinFactories = factories;
   return factories;
 };
+
+const supportsDisabledBuiltinExtensions = () => {
+  const match = String(sdk?.VERSION || "").match(/^(\d+)\.(\d+)/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 1 || (major === 1 && minor >= 5);
+};
+
+const getEnabledBuiltinFactories = (config) => (
+  buildOptionalBuiltinFactories().filter((item) => config[item.name] === true)
+);
+
+const getDisabledBuiltinNames = (config) => (
+  buildOptionalBuiltinFactories().filter((item) => config[item.name] !== true).map((item) => item.name)
+);
 
 /**
  * 权限扩展自检：Hpp 的权限/plan 拦截全靠这个 inline 工厂注册的 tool_call 钩子。
@@ -1540,18 +1752,41 @@ const assertPermissionExtensionLoaded = (loader) => {
  * loader 构造函数只在初始化时拆一次 builtinExtensions Map，所以工厂要始终留在
  * extensionFactories 里，开关只决定它们是否被登记。
  */
+/**
+ * 组装 Hpp 的 inline 扩展工厂。
+ *
+ * init 与 applyBuiltinExtensionConfig 必须共用这一份列表：以前 init 和热切换各写
+ * 一份，热切换漏掉 present_files，导致会话进行中切换 codemode / mcp 后该工具消失。
+ * 权限扩展必须排第一（<inline:1> 自检，见 assertPermissionExtensionLoaded）。
+ */
+const buildHppExtensionFactories = (builtinFactories = []) => [
+  hppPermissionExtension,
+  hppRuntimePolicyExtension,
+  hppCompactionExtension,
+  activeHppPresentExtension,
+  activeHppTodoExtension,
+  activeHppSubagentExtension,
+  ...builtinFactories,
+].filter(Boolean);
+
 const applyBuiltinExtensionConfig = async (config) => {
   activeBuiltinExtensionConfig = normalizeBuiltinExtensionConfig(config);
   if (!resourceLoader) return;
-  const factories = buildOptionalBuiltinFactories(activeBuiltinExtensionConfig);
-  resourceLoader.extensionFactories = [
-    hppPermissionExtension,
-    hppRuntimePolicyExtension,
-    hppCompactionExtension,
-    activeHppSubagentExtension,
-    ...factories,
-  ].filter(Boolean);
-  resourceLoader.builtinExtensions = new Map(factories.map((item) => [item.name, item]));
+  if (supportsDisabledBuiltinExtensions()) {
+    // 关键：热更新时不要把 builtin 工厂塞回 extensionFactories。
+    // 1.5+ 的 loader 只在构造时把 builtin 拆进 builtinExtensions Map；
+    // reload 会把 extensionFactories 里的每一项都当成 <inline:name> 再加载一次。
+    // 塞回去会导致「开=两套、关=inline 还在跑」。builtin 的开关只由
+    // disabledBuiltinExtensions 表达，工厂实例复用构造时那一批。
+    resourceLoader.extensionFactories = buildHppExtensionFactories();
+    resourceLoader.disabledBuiltinExtensions = new Set(
+      getDisabledBuiltinNames(activeBuiltinExtensionConfig),
+    );
+  } else {
+    const factories = getEnabledBuiltinFactories(activeBuiltinExtensionConfig);
+    resourceLoader.extensionFactories = buildHppExtensionFactories(factories);
+    resourceLoader.builtinExtensions = new Map(factories.map((item) => [item.name, item]));
+  }
   await resourceLoader.reload();
   await session?.reload?.();
   // 工具集变了才需要重算白名单，否则新工具进不了 fullAccessToolNames。
@@ -1572,7 +1807,7 @@ const createInitTimer = () => {
   };
 };
 
-const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig, builtinExtensions }) => {
+const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, compactionConfig, subagentConfig, builtinExtensions, subagentDataDir, sessionKey, worktreeBaseDir }) => {
   const mark = createInitTimer();
   console.error(`[pi-init] target project=${cwd} session=${sessionFilePath || "(new)"}`);
   mark("init:start");
@@ -1662,12 +1897,46 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
         cost: model.cost,
       };
     },
+    // 后台子任务的进度不走主回合事件通道（那个通道要求 activePromptId），
+    // 这里直接写 stdout，由 backend 转成带 background 标记的 subagent_event。
+    emitBackgroundEvent: (payload) => send(payload),
+    subagentDataDir: subagentDataDir || "",
+    sessionKey: sessionKey || (sessionFilePath ? sessionFilePath.replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") : "") || "default",
+    isSessionIdle: () => !activePromptId,
+    canAutoWake: () => canAutoWakeNow(),
+    prepareHostTurn,
+    worktreeBaseDir: worktreeBaseDir || "",
+    // P4：todo 与子 Agent 共享同一个进程内 store。
+    getTodoStore: () => activeHppTodoExtension,
+    // 后台状态变更不在任何 tool_call 里，必须主动推给 UI。
+    emitPlanUpdate: (tasks) => {
+      const steps = (Array.isArray(tasks) ? tasks : []).map((task) => ({
+        id: String(task?.id || ""),
+        title: String(task?.title || ""),
+        status: String(task?.status || "pending"),
+      })).filter((step) => step.id && step.title);
+      // 后台任务在主回合结束后也会改 todo 状态。没有活跃回合时带 background
+      // 标记，渲染层只更新既有消息上的计划，不会为这条事件新开一个助手气泡。
+      send({
+        type: "plan_update",
+        steps,
+        ...(activePromptId ? {} : { background: true }),
+      });
+    },
+    createInheritedSession: () => createInheritedSubagentSession(),
   });
   activeHppSubagentExtension = hppSubagentExtension;
   // 产物声明工具：相对路径按会话工作目录解析，和 pi 的其它工具保持一致。
-  const hppPresentExtension = createHppPresentExtension({ getWorkspaceRoot: () => cwd });
+  activeHppPresentExtension = createHppPresentExtension({ getWorkspaceRoot: () => cwd });
+  // 任务列表：状态存在工具结果 details 里，worker 侧保留实例以便压缩时读取。
+  activeHppTodoExtension = createHppTodoExtension();
   activeAgentDir = agentDir;
   activeShellEnvironmentContract = shellEnvironmentContract;
+  // 1.5+ 内置扩展全量交给 loader，用 disabled 集合表达开关；旧版仍只放启用的。
+  const useDisabledBuiltinExtensions = supportsDisabledBuiltinExtensions();
+  const loaderBuiltinFactories = useDisabledBuiltinExtensions
+    ? buildOptionalBuiltinFactories()
+    : getEnabledBuiltinFactories(activeBuiltinExtensionConfig);
   resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1682,19 +1951,18 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     // Pi loads configured extensions before inline factories and resolves
     // duplicate tool names using the first registration. Keep the built-in
     // subagent last so a user/project/installed Pi extension wins.
-    extensionFactories: [
-      hppPermissionExtension,
-      hppRuntimePolicyExtension,
-      hppCompactionExtension,
-      hppPresentExtension,
-      hppSubagentExtension,
+    extensionFactories: buildHppExtensionFactories(
       // 内置扩展工厂必须带 builtin:true 才会走 builtin:<name> 加载路径；它们不参与
       // <inline:N> 编号，所以插在哪都不影响下面那条 <inline:1> 权限自检。
-      ...buildOptionalBuiltinFactories(activeBuiltinExtensionConfig),
-    ],
+      loaderBuiltinFactories,
+    ),
+    ...(useDisabledBuiltinExtensions
+      ? { disabledBuiltinExtensions: getDisabledBuiltinNames(activeBuiltinExtensionConfig) }
+      : {}),
     appendSystemPrompt: [
       FILE_DISCOVERY_GUIDANCE,
       PRESENT_FILES_GUIDANCE,
+      TODO_GUIDANCE,
       shellEnvironmentContract,
       // Put the host policy in Pi's native base prompt as well as the
       // per-turn hook. This mirrors a project SYSTEM.md without creating or
@@ -1720,6 +1988,9 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     sessionManager,
   });
   session = result.session;
+  // 恢复历史会话 / fork 后，扩展的 session_start 可能早于这里触发；再按当前
+  // 分支显式重建一次，保证压缩和系统提示读到的是这条分支上的任务列表。
+  activeHppTodoExtension?.restoreFromSession?.(session.sessionManager);
   mark("createAgentSession");
   // 网关把上游临时故障包装成 400 时，Pi 默认不会重试；这里补上判定，
   // 复用 Pi 自带的退避与 auto_retry 事件，避免一次抖动终结整轮对话。
@@ -1979,26 +2250,38 @@ const handleSessionEvent = (event) => {
       // before its next assistant output and emits message_start (user) at
       // that point. Signal the backend so the guidance bubble is placed at
       // the start of the guidance response, not earlier.
-      if (pendingGuidanceDeliveries > 0 && isRecord(event.message) && event.message.role === "user") {
-        pendingGuidanceDeliveries -= 1;
-        // 交付按入队顺序发生，队首就是刚被消费的那条。
-        queuedGuidances.shift();
-        send({ type: "guidance_delivered" });
+      if (queuedGuidances.length > 0 && isRecord(event.message) && event.message.role === "user") {
+        // 交付按入队顺序发生，队首就是刚被消费的那条。带上 guidanceId，
+        // 宿主按 id 精确匹配，迟到的交付不会记到另一条引导上。
+        const delivered = queuedGuidances.shift();
+        send({ type: "guidance_delivered", guidanceId: delivered?.id });
       }
       break;
     }
     case "agent_end":
       agentRunActive = false;
-      // 回合结束了，没被消费的引导不会再有交付事件：清零，别把计数漏到下一轮
-      // 去骗出一个凭空多出来的 guidance_delivered。
-      pendingGuidanceDeliveries = 0;
-      queuedGuidances = [];
+      // 注意：这里不能清引导计数。Pi 的 agent_end 在自动重试/压缩恢复之间
+      // 也会触发，此时 steer 队列里的引导可能随后才被消费。真正的终态是
+      // agent_settled。
       send({ type: "agent_end" });
       break;
-    case "agent_settled":
+    case "agent_settled": {
       agentRunActive = false;
-      finishPrompt(activePromptId, event.aborted === true);
+      const settledPromptId = activePromptId;
+      // 回合真正结束：没被消费的引导不会再有交付事件，清空队列。
+      queuedGuidances = [];
+      // 用户主动停止后暂停自动唤醒，直到下一条用户消息（不区分被停的是用户
+      // 回合还是宿主回合：按停止就是想让它停）。
+      if (event.aborted === true) autoWakePaused = true;
+      if (isHostPromptId(settledPromptId)) {
+        if (event.aborted !== true) autoWakeTurnCount += 1;
+        hostTurnId = null;
+        hostTurnTaskIds = [];
+        pendingHostWakeTaskIds = [];
+      }
+      finishPrompt(settledPromptId, event.aborted === true);
       break;
+    }
     case "message_update": {
       if (!activePromptId) break;
       const assistantEvent = event.assistantMessageEvent;
@@ -2363,6 +2646,14 @@ const handleCommand = async (command) => {
         }
         activePromptId = command.id;
         completedPromptIds.delete(command.id);
+        // 用户新的输入把自动唤醒的暂停与连续计数清零，并取消尚未触发的合并唤醒。
+        autoWakePaused = false;
+        autoWakeTurnCount = 0;
+        autoWakeLimitNotified = false;
+        hostTurnId = null;
+        hostTurnTaskIds = [];
+        pendingHostWakeTaskIds = [];
+        activeHppSubagentExtension?.cancelPendingAutoWake?.();
         if (shellWarning && !shellWarningEmitted) {
           shellWarningEmitted = true;
           send({
@@ -2412,7 +2703,6 @@ const handleCommand = async (command) => {
           images: command.images,
         });
         send({ type: "guidance_done", id: command.id });
-        pendingGuidanceDeliveries += 1;
         break;
       case "cancelGuidance": {
         if (!session) throw new Error("Pi SDK session is not initialized");
@@ -2437,7 +2727,6 @@ const handleCommand = async (command) => {
             // 单条恢复失败就丢掉它：让整批卡在半清理状态更难解释。
           }
         }
-        pendingGuidanceDeliveries = queuedGuidances.length;
         send({
           type: "guidance_cancelled",
           id: command.id,
@@ -2455,8 +2744,17 @@ const handleCommand = async (command) => {
         uiBridge?.dismissAll("abort");
         dismissSubagentUIRequests(undefined, "abort");
         const abortedPromptId = activePromptId;
+        // 用户按停止通常就是想让它停：暂停自动唤醒，直到下一条用户消息。
+        autoWakePaused = true;
+        activeHppSubagentExtension?.cancelPendingAutoWake?.({ deliverAs: "nextTurn" });
         await session?.abort();
+        // 用户停止时 Pi 的 steer 队列不会自动丢弃；不清掉的话，下一次消息会
+        // 把已取消的引导重新注入。clearQueue 只清队列，不影响当前回合。
+        try { session?.clearQueue?.(); } catch { /* ignore */ }
+        queuedGuidances = [];
         if (activePromptId === abortedPromptId) activePromptId = null;
+        hostTurnId = null;
+        hostTurnTaskIds = [];
         send({ type: "aborted", id: command.id, promptId: abortedPromptId || undefined });
         break;
       }
@@ -2467,6 +2765,8 @@ const handleCommand = async (command) => {
         send({ type: "actions", id: command.id, actions: await getActions(command.reload === true) });
         break;
       case "setModel": {
+        modelSwitchActive = true;
+        try {
         await waitForCompactionToSettle();
         if (!session) throw new Error("Pi SDK session is not initialized");
         let registeredModel = modelRegistry?.find?.(command.provider, command.modelId);
@@ -2499,6 +2799,9 @@ const handleCommand = async (command) => {
         compactionSuspended = false;
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
+        } finally {
+          modelSwitchActive = false;
+        }
       }
       case "setThinkingLevel":
         session?.setThinkingLevel(command.level);
@@ -2527,6 +2830,12 @@ const handleCommand = async (command) => {
         activeSubagentConfig = normalizeHppSubagentConfig(command.config);
         send({ type: "subagent_config_changed", id: command.id, config: activeSubagentConfig });
         break;
+      case "subagentStop": {
+        const taskId = String(command.taskId || "").trim();
+        const stopped = activeHppSubagentExtension?.stopTask?.(taskId) === true;
+        send({ type: "subagent_stopped", id: command.id, taskId, stopped });
+        break;
+      }
       case "setBuiltinExtensions": {
         if (!resourceLoader) throw new Error("Pi SDK resource loader is not initialized");
         await waitForCompactionToSettle();
@@ -2542,19 +2851,37 @@ const handleCommand = async (command) => {
         send({ type: "builtin_extensions_changed", id: command.id, config: activeBuiltinExtensionConfig });
         break;
       }
-      case "uiResponse":
-        if (!uiBridge?.handleResponse(command.response) && !handleSubagentUIResponse(command.response)) {
-          const responseId = command.response?.id;
-          throw new Error(responseId
-            ? `Unknown Pi UI request: ${responseId}`
-            : "Pi UI response is missing request id");
-        }
-        send({ type: "ui_response_done", id: command.id });
+      case "uiResponse": {
+        const responseId = command.response?.id;
+        if (!responseId) throw new Error("Pi UI response is missing request id");
+        const handled = uiBridge?.handleResponse(command.response)
+          || handleSubagentUIResponse(command.response);
+        // 未知 id（双击确认、应答晚到、请求已被 abort 清掉）按幂等处理：
+        // 抛错只会让调用方看到一个无意义的失败，request id 还留在 pending 里。
+        send({ type: "ui_response_done", id: command.id, ...(handled ? {} : { duplicate: true }) });
         break;
-      case "dispose":
+      }
+      case "dispose": {
         await disposeSession();
-        process.exit(0);
+        // 回 ack 再退出：backend 收到它才开始 waitForExit，总预算才对得上。
+        // stdout 是管道时 write 是异步的，用回调确保这一行真的刷出去。
+        const line = JSON.stringify({ type: "disposed", id: command.id });
+        let exited = false;
+        const exitOnce = () => {
+          if (exited) return;
+          exited = true;
+          process.exit(0);
+        };
+        try {
+          process.stdout.write(`${line}
+`, exitOnce);
+        } catch {
+          exitOnce();
+        }
+        // 写回调在管道已关闭时可能不触发，兜底退出。
+        setTimeout(exitOnce, 200);
         break;
+      }
     }
   } catch (error) {
     send({ type: "error", id: command.id, error: error?.message || String(error) });
@@ -2570,6 +2897,12 @@ rl.on("line", (line) => {
     send({ type: "error", error: error?.message || String(error) });
   }
 });
+// 宿主崩溃/被 kill 后 stdin 会关闭。不处理的话，worker 和它派生的后台子 Agent
+// 会一直常驻（Windows 不会随父进程回收），这里主动回收后退出。
+rl.on("close", () => {
+  try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+  process.exit(0);
+});
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", error: error?.message || String(error) });
@@ -2581,3 +2914,15 @@ process.on("unhandledRejection", (error) => {
   process.exitCode = 1;
   setImmediate(() => process.exit(1));
 });
+
+// 宿主直接终止 worker（应用退出 / 被 kill）时，后台子 Agent 不会自动消失。
+// abort 同步触发 taskkill / kill(-pid)，这里做最后一道回收。
+process.once("exit", () => {
+  try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+});
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => {
+    try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+    process.exit(0);
+  });
+}

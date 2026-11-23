@@ -946,7 +946,9 @@
 
 .chat-todo-summary {
   position: relative;
-  z-index: 2;
+  /* 任务列表（悬浮展开的步骤清单）要压在 Subagent 监视窗上面：监视窗锚在整条
+     悬浮行上方（.subagent-monitor-panel 是 z-index 41），层级低了清单会被它盖住。 */
+  z-index: 42;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -6128,6 +6130,15 @@ body.chat-questionnaire-resizing .chat-bubble {
   color: var(--text-primary);
 }
 
+/* 面板底部说明：告诉用户斜杠不是只有「弹菜单」一条路。 */
+.chat-action-picker-footer {
+  padding: 6px 11px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .chat-action-search {
   display: flex;
   align-items: center;
@@ -6219,7 +6230,8 @@ body.chat-questionnaire-resizing .chat-bubble {
   cursor: pointer;
 }
 
-.chat-action-item:hover {
+.chat-action-item:hover,
+.chat-action-item.active {
   background: var(--bg-hover);
 }
 

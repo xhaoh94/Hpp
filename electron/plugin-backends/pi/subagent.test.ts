@@ -115,6 +115,163 @@ describe("Pi subagent lifecycle", () => {
     agent.dispose();
   });
 
+  it("converts background events without an active prompt", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const handle = createToolMessage(agent);
+    const result = (status: string, exitCode: number) => ({
+      background: true,
+      details: {
+        version: 1,
+        background: true,
+        results: [{
+          id: "sa_bg1",
+          status,
+          background: true,
+          agent: "scout",
+          task: "后台检查",
+          title: "后台检查",
+          model: "test/scout",
+          exitCode,
+          ...(status === "completed" ? { output: "结果正文" } : { message: "正在读文件" }),
+          startedAt: 1000,
+          lastActivityAt: 2000,
+        }],
+      },
+    });
+
+    // 派发工具早已返回，这里没有 activePromptId；事件仍必须转成 subagent_event。
+    handle({
+      type: "subagent_background",
+      toolCallId: "call-bg",
+      background: true,
+      args: { background: true },
+      partialResult: result("running", -1),
+    });
+    handle({
+      type: "subagent_background",
+      toolCallId: "call-bg",
+      background: true,
+      args: { background: true },
+      result: result("completed", 0),
+    });
+
+    const subagentEvents = events.filter((event) => event.type === "subagent_event");
+    expect(subagentEvents).toHaveLength(2);
+    expect(subagentEvents[0]).toMatchObject({
+      phase: "started",
+      state: "running",
+      background: true,
+      subagents: [expect.objectContaining({
+        id: "sa_bg1:1",
+        taskId: "sa_bg1",
+        background: true,
+        status: "running",
+      })],
+    });
+    expect(subagentEvents[1]).toMatchObject({
+      phase: "completed",
+      state: "completed",
+      background: true,
+      subagents: [expect.objectContaining({
+        id: "sa_bg1:1",
+        taskId: "sa_bg1",
+        status: "completed",
+        message: "结果正文",
+      })],
+    });
+    agent.dispose();
+  });
+
+  it("opens and settles a host-initiated turn for auto-wake", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as {
+      handleWorkerMessage: (message: Record<string, unknown>) => void;
+      activePromptIds: Set<string>;
+    };
+    const handle = internals.handleWorkerMessage.bind(agent);
+
+    handle({
+      type: "host_turn_started",
+      id: "host:1",
+      reason: "subagent_result",
+      taskIds: ["sa_1"],
+      clientUserMessageId: "host:host:1",
+    });
+    // 宿主回合也占用 activePromptIds，sendMessage 会因此返回 SESSION_BUSY。
+    expect(internals.activePromptIds.has("host:1")).toBe(true);
+    // beginTurn() 会先发 stream_start，所以按类型查找而不是取第一条。
+    const hostStarted = events.find((event) => event.type === "host_turn_started");
+    expect(hostStarted).toMatchObject({
+      type: "host_turn_started",
+      id: "host:1",
+      reason: "subagent_result",
+      taskIds: ["sa_1"],
+      clientUserMessageId: "host:host:1",
+    });
+
+    handle({ type: "agent_start" });
+    handle({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "继续处理" } });
+    handle({
+      type: "message_end",
+      message: { role: "assistant", text: "继续处理", stopReason: "stop" },
+    });
+    handle({ type: "agent_end" });
+    handle({ type: "prompt_done", id: "host:1" });
+
+    expect(internals.activePromptIds.has("host:1")).toBe(false);
+    const types = events.map((event) => event.type);
+    expect(types).toEqual(expect.arrayContaining([
+      "host_turn_started",
+      "stream_start",
+      "stream_delta",
+      "stream_end",
+      "agent_end",
+    ]));
+    agent.dispose();
+  });
+
+  it("forwards background plan updates", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const handle = createToolMessage(agent);
+    handle({
+      type: "plan_update",
+      steps: [
+        { id: "1", title: "后台任务", status: "in_progress" },
+        { id: "2", title: "后续", status: "pending" },
+      ],
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "plan_update",
+      steps: [
+        { id: "1", title: "后台任务", status: "in_progress" },
+        { id: "2", title: "后续", status: "pending" },
+      ],
+    }));
+    agent.dispose();
+  });
+
+  it("forwards process_event records instead of dropping them", () => {
+    const events: AgentEvent[] = [];
+    const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));
+    const handle = createToolMessage(agent);
+    handle({
+      type: "process_event",
+      entryType: "question",
+      kind: "question",
+      title: "子 Agent 交互已取消",
+      state: "interrupted",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "process_event",
+      entryType: "question",
+      state: "interrupted",
+    }));
+    agent.dispose();
+  });
+
   it("marks a timed out child with a distinct stop reason", () => {
     const events: AgentEvent[] = [];
     const agent = new PiSDKAgent("hpp-session", (event) => events.push(event as AgentEvent));

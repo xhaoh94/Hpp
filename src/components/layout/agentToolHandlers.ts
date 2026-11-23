@@ -9,9 +9,9 @@ import {
   getToolProcessFiles,
   getTodoPlanStepIdsFromToolResult,
   getToolSummary,
+  getPlanStepsSnapshotFromToolResult,
   isCommandNonZeroExit,
   isTodoPlanToolEvent,
-  normalizePlanStepsFromToolResult,
   normalizeToolKind,
   type SessionRuntime,
 } from "./agentEventUtils";
@@ -241,21 +241,24 @@ export function handleToolEndEvent(
   // HPP's existing native plan UI. The parser is intentionally based on the
   // result shape (for example `{ details: { tasks } }`), not on a package name,
   // so other Pi extensions can integrate without an adapter.
-  const allPlanSteps = normalizePlanStepsFromToolResult(effectiveEvent);
-  if (allPlanSteps.length > 0) {
-    let planSteps = allPlanSteps;
+  const planSnapshot = getPlanStepsSnapshotFromToolResult(effectiveEvent);
+  if (planSnapshot !== null) {
+    let planSteps = planSnapshot;
+    let shouldUpdate = true;
     if (isTodoPlanToolEvent(effectiveEvent)) {
       const changedIds = getTodoPlanStepIdsFromToolResult(effectiveEvent);
       if (changedIds.length === 0) {
+        // 显式空快照 = 清空计划；非空但内容里没有 #id 的是历史快照，保持旧行为不展示。
+        shouldUpdate = planSnapshot.length === 0;
         planSteps = [];
       } else {
         const currentTurnIds = new Set(runtime.nativeTodoPlanStepIds);
         for (const id of changedIds) currentTurnIds.add(id);
         runtime.nativeTodoPlanStepIds = Array.from(currentTurnIds);
-        planSteps = allPlanSteps.filter((step) => currentTurnIds.has(step.id));
+        planSteps = planSnapshot.filter((step) => currentTurnIds.has(step.id));
       }
     }
-    if (planSteps.length > 0) ctx.updateProcessPlanSteps(currentSessionId, planSteps, true);
+    if (shouldUpdate) ctx.updateProcessPlanSteps(currentSessionId, planSteps, true);
   }
 
   const toolDetail = getToolDetail(effectiveEvent);

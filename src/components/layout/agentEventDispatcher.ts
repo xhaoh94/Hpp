@@ -24,7 +24,7 @@ import {
   getToolProcessFiles,
   isModelRequestFailureTitle,
   isPlanLikeProcessEvent,
-  normalizePlanStepsFromEvent,
+  getPlanStepsSnapshotFromEvent,
   normalizeAgentTurnRevision,
   normalizeProcessEntryState,
   normalizeProcessEntryType,
@@ -61,7 +61,7 @@ import {
 import type { AgentEventRuntimeController } from "./agentEventTypes";
 import { getSubagentProcessEntry } from "./subagentEvents";
 
-const TURN_START_EVENT_TYPES = new Set(["turn_lifecycle", "message_start", "stream_start", "agent_start"]);
+const TURN_START_EVENT_TYPES = new Set(["turn_lifecycle", "message_start", "stream_start", "agent_start", "host_turn_started"]);
 const TURN_TERMINAL_EVENT_TYPES = new Set([
   "stream_end",
   "agent_end",
@@ -97,6 +97,27 @@ const getLatestUserMessageId = (sessionId: string) => {
     if (messages[index].role === "user") return messages[index].id;
   }
   return null;
+};
+
+/**
+ * 后台事件（plan_update / subagent_event）只更新既有消息，不应因为主回合已
+ * settled、revision 已归档而被门禁丢掉。
+ */
+const isBackgroundStateEvent = (event: AgentEvent) => (
+  event.background === true
+  && (event.type === "plan_update" || event.type === "subagent_event")
+);
+
+/** 该条目是否已经在历史消息里（后台事件要原地更新，不能另开一条助手消息）。 */
+const hasAssistantProcessEntry = (sessionId: string, entryId: string) => {
+  const chatState = useChatStore.getState();
+  const messages = chatState.sessionMessages[sessionId] || (
+    chatState.activeSessionId === sessionId ? chatState.messages : []
+  );
+  return messages.some((message) => (
+    Array.isArray(message.process?.entries)
+    && message.process!.entries.some((entry) => entry.id === entryId)
+  ));
 };
 
 /**
@@ -420,7 +441,9 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
   }
   if (event.type === "context_compaction") {
     if (!shouldAcceptContextCompactionEvent(event, runtime)) return;
-  } else if (!shouldAcceptTurnScopedAgentEvent(event, currentSessionId, runtime)) {
+  } else if (!isBackgroundStateEvent(event) && !shouldAcceptTurnScopedAgentEvent(event, currentSessionId, runtime)) {
+    // 后台事件有独立生命周期：它们只更新既有消息，不新开回合。主回合已经
+    // settled、revision 被归档后，不能因为门禁把这些状态更新丢掉。
     return;
   }
   if (
@@ -476,13 +499,55 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
     case "thinking_end":
       finishThinkingEntry(currentSessionId);
       break;
-    case "subagent_event":
+    case "host_turn_started": {
+      // 后台任务完成后宿主自动拉起的回合：没有用户消息，先建一条助手消息，
+      // 在最前面插入系统提示，让用户知道这是自动继续而不是凭空输出。
+      ensureAssistantContinuation(currentSessionId);
+      const taskIds = Array.isArray(event.taskIds)
+        ? event.taskIds.map((value) => String(value || "")).filter(Boolean)
+        : [];
+      appendProcessEntry(currentSessionId, {
+        id: `host-turn-${String(event.id || "started")}`,
+        type: "status",
+        title: "后台任务已完成，Agent 自动继续",
+        detail: taskIds.length > 0 ? `任务：${taskIds.join("、")}` : undefined,
+        timestamp: Date.now(),
+        state: "completed",
+      });
+      break;
+    }
+    case "subagent_event": {
+      const draft = getSubagentProcessEntry(event);
+      // 后台子任务在派发它的工具调用返回后仍会持续上报。此时不能
+      // ensureAssistantContinuation —— 那会为每条进度新建一条助手消息
+      // （空气泡），也会让完成通知重复出现。原地更新原来的 process entry，
+      // 监视窗和已完成的历史记录都能继续工作。
+      if (event.background === true) {
+        if (draft.id && hasAssistantProcessEntry(currentSessionId, draft.id)) {
+          useChatStore.getState().updateLastAssistantProcessEntry(draft.id, {
+            title: draft.title,
+            detail: draft.detail,
+            prompt: draft.prompt,
+            state: draft.state,
+            ...(draft.phase ? { phase: draft.phase } : {}),
+            ...(draft.timestamp !== undefined ? { timestamp: draft.timestamp } : {}),
+            ...(draft.startedAt !== undefined ? { startedAt: draft.startedAt } : {}),
+            ...(draft.completedAt !== undefined ? { completedAt: draft.completedAt } : {}),
+            ...(draft.subagents ? { subagents: draft.subagents } : {}),
+          }, currentSessionId);
+          break;
+        }
+        // 条目不存在说明这个会话的 process 历史已经丢了；只有在当前已有
+        // 活跃回合时才补一条，避免空闲态凭空造消息。
+        if (!runtime.processActive && !runtime.streamStarted) break;
+      }
+      updateInferredPlanSteps(currentSessionId, "operate");
       ensureAssistantContinuation(currentSessionId);
       finishAssistantProcessText(currentSessionId);
       finishThinkingEntry(currentSessionId);
-      updateInferredPlanSteps(currentSessionId, "operate");
-      appendProcessEntry(currentSessionId, getSubagentProcessEntry(event));
+      appendProcessEntry(currentSessionId, draft);
       break;
+    }
     case "user_ask_question":
     case "ask_user_question":
     case "ask_user":
@@ -601,6 +666,13 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
           ? event.phase
           : "completed",
         typeof event.postTurn === "boolean" ? event.postTurn : undefined,
+        // 失败原因（后端放在 detail / error 里）：不传的话分隔条只剩一句
+        // 「上下文压缩失败」，和自动压缩那条带原因的提示对不上。
+        typeof event.detail === "string"
+          ? event.detail.trim().slice(0, 240)
+          : typeof event.error === "string"
+            ? event.error.trim().slice(0, 240)
+            : undefined,
       );
       break;
     case "auto_compaction_failed":
@@ -629,11 +701,22 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
       break;
     case "plan_update":
       {
-        const steps = normalizePlanStepsFromEvent(event);
-        if (steps.length === 0) break;
+        const steps = getPlanStepsSnapshotFromEvent(event);
+        if (steps === null) break;
+        // 后台任务在主回合结束后也会更新计划。此时只更新既有消息上的计划，
+        // 不 ensureAssistantContinuation：否则每条 plan_update 都会新建一条
+        // 只有计划条的空气泡，并多触发一次完成通知。
+        if (event.background === true) {
+          const backgroundRuntime = getRuntime(currentSessionId);
+          if (!backgroundRuntime.processActive && !backgroundRuntime.streamStarted) {
+            updateProcessPlanSteps(currentSessionId, steps, true, { createIfMissing: false });
+            break;
+          }
+        }
         ensureAssistantContinuation(currentSessionId);
         finishAssistantProcessText(currentSessionId);
         finishThinkingEntry(currentSessionId);
+        // 显式空 steps 表示清空计划，也要写入。
         updateProcessPlanSteps(currentSessionId, steps, true);
       }
       break;
@@ -657,8 +740,8 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
             : normalizeToolKind(event.toolKind))
         : undefined;
       if (isPlanLikeProcessEvent(event)) {
-        const steps = normalizePlanStepsFromEvent(event);
-        if (steps.length > 0) {
+        const steps = getPlanStepsSnapshotFromEvent(event);
+        if (steps !== null) {
           ensureAssistantContinuation(currentSessionId);
           finishAssistantProcessText(currentSessionId);
           finishThinkingEntry(currentSessionId);

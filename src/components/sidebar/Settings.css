@@ -1656,10 +1656,23 @@
   max-height: min(86vh, 760px);
 }
 
-.settings-modal.agent-subagent-modal,
 .settings-modal.agent-mcp-modal {
   width: min(720px, calc(100vw - 32px));
   max-height: min(86vh, 820px);
+}
+
+/* SubAgent 设置信息密度高：加宽到两列，目标是一屏放下、不出现内部滚动。 */
+.settings-modal.agent-subagent-modal {
+  width: min(880px, calc(100vw - 32px));
+  max-height: min(88vh, 820px);
+}
+
+.settings-modal.agent-subagent-modal .settings-modal-header {
+  padding: 12px 18px;
+}
+
+.settings-modal.agent-subagent-modal .agent-subagent-modal-content {
+  padding: 12px 18px 14px;
 }
 
 .agent-compaction-modal-title,
@@ -1699,12 +1712,133 @@
   flex-direction: column;
 }
 
-.settings-subagent-enabled {
-  min-height: 58px;
+/* 左：基础开关 + 模型池；右：后台与自动继续。
+   两列等高起点，右列不再需要自己的上边框，避免和左列首行错位。 */
+.settings-subagent-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 0 20px;
+}
+
+.settings-subagent-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+/* 不支持模型池的 Agent 只有一个开关：不要留半个空列。 */
+.settings-subagent-body-single .settings-subagent-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 信息密度高：行高按内容收紧（标题 + 单行说明约 46px），
+   不再沿用通用设置行的 58px。 */
+.settings-subagent-body .settings-general-row {
+  min-height: 46px;
+  padding: 7px 10px;
+  gap: 12px;
+}
+
+.settings-subagent-body .settings-general-row-main {
+  gap: 3px;
+}
+
+.settings-subagent-body .settings-general-row-main > span {
+  line-height: 1.35;
+  /* 分两列后每列变窄：说明允许折行，宁可多 16px 行高，
+     也不要把句子截成「…」——这个弹窗的目标就是一屏看全。 */
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+/* 数字项都是 1~120 的小整数：固定窄列，别把说明挤到折行。 */
+.settings-subagent-body input[type="number"] {
+  flex: 0 0 64px;
+  width: 64px;
+  text-align: right;
+}
+
+/* 两个总开关共用一行：小开关 + 短标签，说明走 title 悬停。
+   相比两行「标题 + 说明」，高度从 ~92px 压到 34px。 */
+.settings-subagent-switches {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.settings-subagent-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.settings-subagent-switch:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 比通用开关（32×18）小一号：26×15，圆钮 11px。 */
+.settings-subagent-switch input {
+  position: relative;
+  width: 26px;
+  height: 15px;
+  flex: 0 0 26px;
+  margin: 0;
+  appearance: none;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.settings-subagent-switch input::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: transform 140ms ease, background-color 140ms ease;
+}
+
+.settings-subagent-switch input:checked {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+}
+
+.settings-subagent-switch input:checked::after {
+  transform: translateX(11px);
+  background: #fff;
+}
+
+.settings-subagent-switch input:disabled {
+  cursor: not-allowed;
+}
+
+.settings-subagent-switch-note {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 400;
 }
 
 .settings-subagent-row {
-  min-height: 58px;
+  min-height: 46px;
   margin-top: -1px;
 }
 
@@ -1907,19 +2041,25 @@
 }
 
 .settings-subagent-section-title {
-  padding: 10px 2px 7px;
+  padding: 6px 2px 4px;
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
 }
 
-.settings-subagent-pool-switch {
+.settings-subagent-pool {
   margin-top: 8px;
+  border-top: 1px solid var(--border-color);
 }
 
-.settings-subagent-pool {
-  margin-top: 14px;
-  border-top: 1px solid var(--border-color);
+/* 右列自带分区标题，从首行开始排：去掉上边框与额外间距，和左列首行对齐。 */
+.settings-subagent-pool-plain {
+  margin-top: 0;
+  border-top: 0;
+}
+
+.settings-subagent-pool-plain .settings-subagent-section-header {
+  padding-top: 0;
 }
 
 .settings-subagent-section-header {
@@ -1927,7 +2067,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 8px 2px 6px;
+  padding: 6px 2px 4px;
 }
 
 .settings-subagent-section-header .settings-subagent-section-title {
@@ -2011,7 +2151,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 5px 10px;
   border: 1px dashed var(--border-color);
   border-radius: 6px;
@@ -2170,6 +2310,14 @@
 
 @keyframes settings-storage-spin {
   to { transform: rotate(360deg); }
+}
+
+/* 窗口不够宽时回到单列：两列被挤窄会让说明疯狂折行，反而更长。 */
+@media (max-width: 860px) {
+  .settings-subagent-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
 }
 
 @media (max-width: 560px) {

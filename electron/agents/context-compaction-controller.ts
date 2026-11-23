@@ -72,6 +72,12 @@ interface SessionCompactionState {
   compacting: boolean;
   /** 后端正在压缩（原生或手动）：期间上报的用量不是「当前上下文」，不能拿来判定。 */
   compactionActive: boolean;
+  /** 压缩看门狗：后端既不回终态、compact() 也不拒绝时兜底解除压制。 */
+  compactionWatchdog?: ReturnType<typeof setTimeout>;
+  /** 最近一次压缩终态的时间：用来识别「终态事件 + compact() 抛错」是同一次失败。 */
+  lastCompactionEndAt: number;
+  /** 最近一次已上报的失败原因：同样的原因连续出现时不重复刷屏。 */
+  lastFailureMessage?: string;
 }
 
 const createState = (): SessionCompactionState => ({
@@ -82,6 +88,7 @@ const createState = (): SessionCompactionState => ({
   armedEpoch: 0,
   compacting: false,
   compactionActive: false,
+  lastCompactionEndAt: 0,
   idleRetryAttempt: 0,
 });
 
@@ -92,6 +99,18 @@ const createState = (): SessionCompactionState => ({
 const IDLE_RETRY_INTERVAL_MS = 150;
 /** 最多等 6s：再久就不是「晚一拍」，而是后端真的还在干活，交给下一个回合结束。 */
 const IDLE_RETRY_MAX_ATTEMPTS = 40;
+/**
+ * 压缩看门狗：四家的 compact() 超时都在 180s 以内（worker 兜底更早）。
+ * 超过这个时间还没收到终态，说明事件丢了或进程卡死——必须解除「压缩中」的
+ * 用量压制，否则这个会话的阈值会永久静默失效，直到换模型或重开会话。
+ */
+const COMPACTION_WATCHDOG_MS = 240_000;
+/**
+ * 终态事件之后这么短时间内的 compact() 拒绝，视为同一次失败。
+ * 后端都是先发 `context_compaction failed` 再让命令失败，界面已经有记录了；
+ * 不压制的话每次失败都会冒出两条「压缩失败」。
+ */
+const COMPACTION_FAILURE_DEDUPE_MS = 10_000;
 
 export class ContextCompactionController {
   /** 没有会话级配置时的缺省阈值（兼容旧版全局设置）。 */
@@ -212,25 +231,38 @@ export class ContextCompactionController {
         if (state.compactionActive) {
           state.compactionActive = false;
           state.armedEpoch = state.turnEpoch;
+          state.lastCompactionEndAt = Date.now();
+          this.clearCompactionWatchdog(state);
         }
         this.tryCompact(sessionId);
         break;
       }
       case "context_compaction": {
+        const phase = typeof event.phase === "string" ? event.phase : "";
+        // 旧 SDK 的兜底事件只知道「发生了压缩」，不带 phase：不能当成结束，
+        // 否则会在压缩还在跑时解除压制；等真实终态或看门狗兜底。
+        if (!phase) break;
         const state = this.getState(sessionId);
         // 已经有一次压缩在跑（后端原生或手动）：本回合不再自动触发。
         state.armedEpoch = state.turnEpoch;
-        state.compactionActive = event.phase === "started";
-        if (event.phase !== "started") {
-          // 压缩结束：压缩前的用量读数作废，等下一轮重新上报。
-          state.usedTokens = 0;
-          state.above = false;
-          state.armed = false;
-          // 压缩自己也会产生流式事件（claude 的 /compact 就是一条普通命令），
-          // 把 turnEpoch 推进了一格。这里重新上锁，否则压缩结束后掉队的
-          // 摘要用量会把闩锁点回来，紧接着的 backend_idle 会立刻再压一次。
-          state.armedEpoch = state.turnEpoch;
+        state.compactionActive = phase === "started";
+        if (phase === "started") {
+          // 事件可能丢（worker 崩、流断开）：挂一个看门狗兜底解除压制。
+          this.armCompactionWatchdog(sessionId, state);
+          break;
         }
+        this.clearCompactionWatchdog(state);
+        // 压缩结束：压缩前的用量读数作废，等下一轮重新上报。
+        state.usedTokens = 0;
+        state.above = false;
+        state.armed = false;
+        // 压缩自己也会产生流式事件（claude 的 /compact 就是一条普通命令），
+        // 把 turnEpoch 推进了一格。这里重新上锁，否则压缩结束后掉队的
+        // 摘要用量会把闩锁点回来，紧接着的 backend_idle 会立刻再压一次。
+        state.armedEpoch = state.turnEpoch;
+        state.lastCompactionEndAt = Date.now();
+        // 压缩真正成功一次才算「这个原因已经解决」；失败原因要留着去重。
+        if (phase === "completed") state.lastFailureMessage = undefined;
         break;
       }
       case "model_changed":
@@ -250,7 +282,10 @@ export class ContextCompactionController {
   /** 会话关闭后清掉状态，避免把闩锁带到下一个复用同 id 的会话。 */
   forget(sessionId: string): void {
     const state = this.states.get(sessionId);
-    if (state) this.clearIdleRetry(state);
+    if (state) {
+      this.clearIdleRetry(state);
+      this.clearCompactionWatchdog(state);
+    }
     this.states.delete(sessionId);
     this.sessionThresholds.delete(sessionId);
   }
@@ -261,6 +296,7 @@ export class ContextCompactionController {
     if (!state) return;
     const { contextWindow } = state;
     this.clearIdleRetry(state);
+    this.clearCompactionWatchdog(state);
     this.states.delete(sessionId);
     if (typeof contextWindow === "number" && contextWindow > 0) {
       this.getState(sessionId).contextWindow = contextWindow;
@@ -269,7 +305,10 @@ export class ContextCompactionController {
 
   /** 运行时整体关闭（插件热更新 / 退出）：所有会话的闩锁与阈值一起作废。 */
   reset(): void {
-    for (const state of this.states.values()) this.clearIdleRetry(state);
+    for (const state of this.states.values()) {
+      this.clearIdleRetry(state);
+      this.clearCompactionWatchdog(state);
+    }
     this.states.clear();
     this.sessionThresholds.clear();
   }
@@ -343,7 +382,10 @@ export class ContextCompactionController {
 
   private tryCompact(sessionId: string): void {
     const state = this.states.get(sessionId);
-    if (!state || state.compacting) return;
+    // compactionActive：后端自己（或用户手动）正在压缩。此时再调 compact()
+    // 只会拿到 SESSION_BUSY —— 闩锁可能在手动压缩开始前就已经点亮，
+    // 光靠 armedEpoch 挡不住压缩自身的流式事件推进回合序号。
+    if (!state || state.compacting || state.compactionActive) return;
 
     // 用最新读数重新确认一次：可能出现「挂起时到了阈值、回合结束时又被压缩过」。
     this.updateLatch(sessionId, state);
@@ -379,8 +421,10 @@ export class ContextCompactionController {
         // 否则这个会话的用量读数会被永久忽略，阈值从此静默失效，直到换模型或重开会话。
         // pi 的 compact() 超时只抛错、不会再补一条终态事件，最容易命中这条路径。
         state.compactionActive = false;
+        this.clearCompactionWatchdog(state);
         const message = error instanceof Error ? error.message : String(error);
-        this.host.onError?.(sessionId, `自动压缩失败：${message}`);
+        // 只传原因：界面会自己加「上下文压缩失败：」前缀，这里再写一遍就重复了。
+        this.reportFailure(sessionId, state, message);
       })
       .finally(() => {
         state.compacting = false;
@@ -413,5 +457,59 @@ export class ContextCompactionController {
     if (!state.idleRetryTimer) return;
     clearTimeout(state.idleRetryTimer);
     state.idleRetryTimer = undefined;
+  }
+
+  /**
+   * 压缩开始后挂一个看门狗。
+   *
+   * 正常路径上，压缩一定会以 `context_compaction` 终态或 `compact()` 抛错收尾，
+   * 两条路都会解除 compactionActive。真正危险的是「两条都没来」：worker 崩在
+   * 压缩中途、事件流断开、插件进程被杀。那时用量读数会被永久忽略，阈值从此
+   * 静默失效——用户只会看到上下文一路涨到后端自己的极限。
+   */
+  private armCompactionWatchdog(sessionId: string, state: SessionCompactionState): void {
+    this.clearCompactionWatchdog(state);
+    const timer = setTimeout(() => {
+      state.compactionWatchdog = undefined;
+      // 会话被关掉 / 状态被换掉：这条计时器已经没有意义。
+      if (this.states.get(sessionId) !== state) return;
+      if (!state.compactionActive) return;
+      state.compactionActive = false;
+      state.usedTokens = 0;
+      state.above = false;
+      state.armed = false;
+      state.armedEpoch = state.turnEpoch;
+      // 先上报再打时间戳：reportFailure 会看 lastCompactionEndAt 去重，
+      // 顺序反过来会把自己这条提示也吞掉。
+      this.reportFailure(sessionId, state, "压缩未在预期时间内结束（可能已中断）");
+      state.lastCompactionEndAt = Date.now();
+    }, COMPACTION_WATCHDOG_MS);
+    // 一个待压缩的会话不该拖住进程退出。
+    (timer as { unref?: () => void }).unref?.();
+    state.compactionWatchdog = timer;
+  }
+
+  private clearCompactionWatchdog(state: SessionCompactionState): void {
+    if (!state.compactionWatchdog) return;
+    clearTimeout(state.compactionWatchdog);
+    state.compactionWatchdog = undefined;
+  }
+
+  /**
+   * 上报一次自动压缩失败，并做两层去重：
+   * 1. 后端刚刚已经报过终态（它们都是先发事件再让命令失败）——界面有记录了；
+   * 2. 与上次上报的原因完全相同——闩锁每回合都会重试，别把同一句话刷满对话。
+   */
+  private reportFailure(sessionId: string, state: SessionCompactionState, message: string): void {
+    const now = Date.now();
+    if (
+      state.lastCompactionEndAt > 0
+      && now - state.lastCompactionEndAt < COMPACTION_FAILURE_DEDUPE_MS
+    ) {
+      return;
+    }
+    if (state.lastFailureMessage === message) return;
+    state.lastFailureMessage = message;
+    this.host.onError?.(sessionId, message);
   }
 }

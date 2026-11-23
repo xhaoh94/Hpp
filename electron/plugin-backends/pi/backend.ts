@@ -96,6 +96,22 @@ const optionalString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
 /**
+ * 回收 worker 及其子进程树。
+ * Windows 上 worker 后台子 Agent 是它的后代，单独 kill 父进程会留下孤儿；
+ * taskkill /t 才能一并结束。POSIX 下 worker 不在独立进程组，只能尽力 kill。
+ */
+const killChildTree = (child: ChildProcess | null | undefined): void => {
+  // exitCode 与 signalCode 都要看：被信号终止的进程 exitCode 仍是 null，
+  // 再对它发 taskkill 会打在已经回收的 pid 上（存在 pid 复用误杀风险）。
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => undefined);
+    return;
+  }
+  try { child.kill("SIGKILL"); } catch { /* ignore */ }
+};
+
+/**
  * 需要等待用户回答的 UI 请求。
  *
  * Pi 的 RPC 模式会把所有扩展 UI 调用都发成 extension_ui_request，其中
@@ -141,13 +157,18 @@ const normalizeModels = (value: unknown): AgentModel[] => {
   });
 };
 
-const PI_WORKER_INIT_TIMEOUT_MS = 120_000;
+// 内层 init 超时必须短于主进程的会话初始化超时（agent-manager 90s）：
+// 否则外层先超时并 dispose，这里的定时器还会再多挂 30s 才 reject。
+const PI_WORKER_INIT_TIMEOUT_MS = 60_000;
 // A context compaction keeps the worker busy for potentially tens of
 // seconds. Probing for models mid-compaction can time out and report an
 // empty list, which the renderer would treat as "no models available" and
 // clear its model picker. Wait (bounded) for the compaction to settle before
 // asking the worker for the model list.
 const PI_COMPACTION_MODEL_WAIT_MS = 30_000;
+// 模型切换的 RPC 内层超时必须长于主进程的总超时（agent-manager 120s），
+// 否则会出现「前端已判失败、worker 稍后仍切换成功」的分叉。
+const PI_MODEL_SWITCH_RPC_TIMEOUT_MS = 130_000;
 const PI_SUBAGENT_DETAIL_CAP = 4000;
 /** 监视窗里显示的实时输出片段上限（只取尾巴，不影响最终结果）。 */
 const PI_SUBAGENT_LIVE_OUTPUT_CAP = 2400;
@@ -306,8 +327,14 @@ const buildPiSubagentEvent = (
     const agent = String(result.agent || result.name || args.agent || `subagent-${index + 1}`).trim();
     const task = truncatePiSubagentText(String(result.task || "").trim());
     const usage = getPiSubagentUsage(result);
+    // 后台任务带稳定 id（sa_xxx），监视窗的停止/续聊都靠它；同步任务没有。
+    const taskId = String(result.id || "").trim();
+    const resultBackground = background || result.background === true;
     return {
-      id: `${toolCallId}:${index + 1}`,
+      id: taskId ? `${taskId}:${index + 1}` : `${toolCallId}:${index + 1}`,
+      ...(taskId ? { taskId } : {}),
+      ...(resultBackground ? { background: true } : {}),
+      ...(Number(result.rounds) > 0 ? { rounds: Number(result.rounds) } : {}),
       label: humanizeSubagentLabel(agent),
       // 调度方给的极简展示标题（插件 1.4.1+），透传给界面胶囊/页签。
       ...(typeof result.title === "string" && result.title.trim() ? { title: result.title.trim() } : {}),
@@ -408,7 +435,8 @@ export class PiSDKAgent {
    * 用计数而不是布尔：同时有两条引导在途时，布尔会让第一条交付把信号吃掉，
    * 第二条的 `guidance_response_started` 永远不发，渲染层那条引导就卡在等待。
    */
-  private guidancePendingResponses = 0;
+  /** 已入队、还没被 agent 消费的引导 id。按 id 匹配，迟到的交付不会记到别的引导上。 */
+  private guidancePendingIds = new Set<string>();
   private piSubagentStarts = new Map<string, PiSubagentStart>();
   private piSubagentTerminalStates = new Map<string, NativeSubagentStatus>();
   // Ordinary tool end notifications can be replayed by an adapter after a
@@ -419,8 +447,15 @@ export class PiSDKAgent {
   private ignoredToolCallIds = new Set<string>();
 
   constructor(hppSessionId = "default", emit?: (event: UnknownRecord) => void) {
+    this.hppSessionId = hppSessionId;
     this.eventBuffer = new AgentEventBuffer(hppSessionId, emit);
   }
+
+  private readonly hppSessionId: string;
+  /** 每次 init 自增；dispose 或更新的 init 会让旧 init 立即作废。 */
+  private initGeneration = 0;
+  /** 在途 init 的 reject；dispose 时用它让 init 立即失败，而不是等超时。 */
+  private initReject: ((error: Error) => void) | null = null;
 
   get sessionFilePath(): string | null {
     return this._sessionFilePath;
@@ -428,6 +463,7 @@ export class PiSDKAgent {
 
   async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     const initStartedAt = Date.now();
+    const generation = ++this.initGeneration;
     const requestedSessionFilePath = existingSessionFilePath || null;
     const requestedHostSystemPrompt = String(options?.hostSystemPrompt || "").trim();
     const requestedCompactionConfig = normalizeAgentCompactionConfig(options?.compaction);
@@ -452,7 +488,12 @@ export class PiSDKAgent {
     }
 
     this.initKey = nextInitKey;
-    await this.dispose();
+    await this.disposeInternal();
+    // 在拆卸旧 worker 期间可能又来了新的 init 或 dispose：自己的 generation
+    // 已不是最新，不能再往下 spawn（否则会留下一个没人持有的 worker）。
+    if (generation !== this.initGeneration) {
+      throw new Error("Pi SDK init superseded by a newer init or dispose");
+    }
     this.initKey = nextInitKey;
     this.projectPath = projectPath;
     this._sessionFilePath = existingSessionFilePath || null;
@@ -495,10 +536,19 @@ export class PiSDKAgent {
         buffer = buffer.slice(newlineIndex + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (!line.trim()) continue;
+        let parsed: unknown;
         try {
-          this.handleWorkerMessage(JSON.parse(line), child);
+          parsed = JSON.parse(line);
         } catch {
-          // Ignore non-protocol output from dependencies.
+          // 非协议输出（依赖库 / 第三方扩展的 console.log）直接跳过。
+          continue;
+        }
+        try {
+          this.handleWorkerMessage(parsed, child);
+        } catch (error) {
+          // 处理异常不能当「非协议输出」吞掉，否则本批剩余行会滞留，
+          // prompt_done / diff_update 可能永远不到渲染层。
+          console.error("[pi] failed to handle worker event:", error instanceof Error ? error.message : String(error));
         }
       }
     });
@@ -544,8 +594,11 @@ export class PiSDKAgent {
       ].filter(Boolean).join("\n"));
     });
 
+    let rejectInit: ((error: Error) => void) | null = null;
     const initPromise = new Promise<void>((resolve, reject) => {
       let initId = "";
+      rejectInit = (error) => reject(error);
+      this.initReject = rejectInit;
       const timeout = setTimeout(() => {
         if (initId) this.pendingResponses.delete(initId);
         reject(new Error("Pi SDK worker init timed out"));
@@ -559,6 +612,9 @@ export class PiSDKAgent {
           compactionConfig: this.compactionConfig,
           subagentConfig: this.subagentConfig,
           builtinExtensions: this.builtinExtensionConfig,
+          subagentDataDir: join(process.env.HPP_DATA_DIR || process.cwd(), "pi-subagents"),
+          sessionKey: this.hppSessionId,
+          worktreeBaseDir: join(process.env.HPP_DATA_DIR || process.cwd(), "worktrees"),
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "ready") {
@@ -587,10 +643,11 @@ export class PiSDKAgent {
         this.process = null;
         this.processForCleanup = null;
         this.isReady = false;
-        child.kill();
+        killChildTree(child);
       }
       throw error;
     } finally {
+      if (this.initReject === rejectInit) this.initReject = null;
       if (this.initPromise === initPromise) {
         this.initPromise = null;
         this.initKey = null;
@@ -692,7 +749,7 @@ export class PiSDKAgent {
         }, (data) => {
           clearTimeout(timeout);
           if (data.type === "accepted" || data.type === "guidance_done") {
-            if (data.type === "guidance_done") this.guidancePendingResponses += 1;
+            if (data.type === "guidance_done") this.guidancePendingIds.add(guidanceId);
             resolve();
           } else {
             reject(new Error(optionalString(data.error) || "Pi SDK guidance failed"));
@@ -727,7 +784,7 @@ export class PiSDKAgent {
           // 撤回成功就不会再有这条的交付事件，计数要同步减掉，否则后面会多冒
           // 一个 guidance_response_started 出来。
           if (cancelled) {
-            this.guidancePendingResponses = Math.max(0, this.guidancePendingResponses - 1);
+            this.guidancePendingIds.delete(guidanceId);
           }
           resolve({ cancelled, reason: optionalString(data.reason) });
         });
@@ -757,6 +814,14 @@ export class PiSDKAgent {
           sourceSessionFilePath: target.sourceSessionFilePath || this._sessionFilePath || undefined,
         }, (data) => {
           clearTimeout(timeout);
+          if (data.type !== "fork_session_result") {
+            resolve({
+              supported: true,
+              success: false,
+              error: optionalString(data.error) || "Pi SDK fork returned an unexpected response",
+            });
+            return;
+          }
           resolve({
             supported: data.supported !== false,
             success: !!data.success,
@@ -774,6 +839,22 @@ export class PiSDKAgent {
   }
 
   async abort(): Promise<void> {
+    if (this.isAborting) return;
+    // 已空闲时不要走 5 秒的 abort 握手：否则用户「停完立刻发消息」会被
+    // isAborting 挡住，报 SESSION_BUSY。前台子 Agent 仍需要收到中断事件，
+    // 所以有前台子任务时继续走完整流程；后台子任务本来就不该被 abort 杀掉。
+    const hasForegroundSubagent = [...this.piSubagentStarts.values()]
+      .some((start) => asRecord(start.args).background !== true);
+    if (!this.turnActive && this.activePromptIds.size === 0 && !this.compactionActive && !hasForegroundSubagent) {
+      // 即使本地已经空闲，也要通知 worker：清 steer 队列、暂停自动唤醒、
+      // 关掉待答对话框。不发的话，用户按停止后后台任务仍会自动唤醒。
+      // 不等待响应：空闲路径不能因为 worker 晚回包而拖慢「停完立刻发消息」。
+      try { this.sendWorkerCommand({ type: "abort" }); } catch { /* ignore */ }
+      this.finishAbortState();
+      this.emitEvent({ type: "aborted" });
+      return;
+    }
+    this.guidancePendingIds.clear();
     this.pendingAssistantText = "";
     this.streamedText = false;
     this.streamedTextBuffer = "";
@@ -804,8 +885,11 @@ export class PiSDKAgent {
         resolve();
       }, 5000);
       try {
-        requestId = this.sendWorkerCommand({ type: "abort" }, () => {
+        requestId = this.sendWorkerCommand({ type: "abort" }, (data) => {
           clearTimeout(timeout);
+          if (data.type === "error") {
+            console.error("[pi] abort failed:", optionalString(data.error) || "unknown error");
+          }
           resolve();
         });
       } catch {
@@ -834,6 +918,11 @@ export class PiSDKAgent {
       try {
         requestId = this.sendWorkerCommand({ type: "getModels" }, (data) => {
           clearTimeout(timeout);
+          if (data.type !== "models") {
+            // 响应类型不对就不当成模型列表：否则会把错误当空列表缓存下来。
+            resolve(this.models);
+            return;
+          }
           this.models = normalizeModels(data.models);
           resolve(this.models);
         });
@@ -878,13 +967,11 @@ export class PiSDKAgent {
       const timeout = setTimeout(() => {
         if (requestId) this.pendingResponses.delete(requestId);
         reject(new Error("Pi SDK set model timed out"));
-      }, 8000);
+      }, PI_MODEL_SWITCH_RPC_TIMEOUT_MS);
       try {
         requestId = this.sendWorkerCommand({ type: "setModel", provider, modelId }, (data) => {
           clearTimeout(timeout);
           if (data.type === "model_changed") {
-            this.models = [];
-            this.emitEvent({ type: "model_changed", model: data.model });
             resolve();
             return;
           }
@@ -934,12 +1021,22 @@ export class PiSDKAgent {
 
   async setCompactionConfig(value: AgentCompactionConfig): Promise<void> {
     const config = normalizeAgentCompactionConfig(value);
-    this.compactionConfig = config;
-    if (!this.process) return;
-    const data = await this.requestWorkerCommand({ type: "setCompactionConfig", config }, 8_000);
-    if (data.type !== "compaction_config_changed") {
-      throw new Error(optionalString(data.error) || "Pi SDK set compaction config failed");
+    if (!this.process) {
+      this.compactionConfig = config;
+      return;
     }
+    const previous = this.compactionConfig;
+    try {
+      const data = await this.requestWorkerCommand({ type: "setCompactionConfig", config }, 8_000);
+      if (data.type !== "compaction_config_changed") {
+        throw new Error(optionalString(data.error) || "Pi SDK set compaction config failed");
+      }
+    } catch (error) {
+      // 失败不能留在本地缓存：下次 init 的幂等判断会以为已下发而跳过。
+      this.compactionConfig = previous;
+      throw error;
+    }
+    this.compactionConfig = config;
   }
 
   /**
@@ -949,12 +1046,32 @@ export class PiSDKAgent {
    */
   async setSubagentConfig(value: AgentSubagentConfig): Promise<void> {
     const config = normalizeAgentSubagentConfig(value);
-    this.subagentConfig = config;
-    if (!this.process) return;
-    const data = await this.requestWorkerCommand({ type: "setSubagentConfig", config }, 8_000);
-    if (data.type !== "subagent_config_changed") {
-      throw new Error(optionalString(data.error) || "Pi SDK set subagent config failed");
+    if (!this.process) {
+      this.subagentConfig = config;
+      return;
     }
+    const previous = this.subagentConfig;
+    try {
+      const data = await this.requestWorkerCommand({ type: "setSubagentConfig", config }, 8_000);
+      if (data.type !== "subagent_config_changed") {
+        throw new Error(optionalString(data.error) || "Pi SDK set subagent config failed");
+      }
+    } catch (error) {
+      this.subagentConfig = previous;
+      throw error;
+    }
+    this.subagentConfig = config;
+  }
+
+  async stopSubagent(taskId: string): Promise<boolean> {
+    if (!this.process) return false;
+    const id = String(taskId || "").trim();
+    if (!id) return false;
+    const data = await this.requestWorkerCommand({ type: "subagentStop", taskId: id }, 8_000);
+    if (data.type !== "subagent_stopped") {
+      throw new Error(optionalString(data.error) || "Pi SDK stop subagent failed");
+    }
+    return data.stopped === true;
   }
 
   /**
@@ -969,16 +1086,25 @@ export class PiSDKAgent {
    */
   async setBuiltinExtensions(value: unknown, options?: { force?: boolean }): Promise<void> {
     const config = normalizeAgentBuiltinExtensionConfig(value);
-    this.builtinExtensionConfig = config;
-    if (!this.process) return;
-    const data = await this.requestWorkerCommand({
-      type: "setBuiltinExtensions",
-      config,
-      force: options?.force === true,
-    }, 15_000);
-    if (data.type !== "builtin_extensions_changed") {
-      throw new Error(optionalString(data.error) || "Pi SDK set builtin extensions failed");
+    if (!this.process) {
+      this.builtinExtensionConfig = config;
+      return;
     }
+    const previous = this.builtinExtensionConfig;
+    try {
+      const data = await this.requestWorkerCommand({
+        type: "setBuiltinExtensions",
+        config,
+        force: options?.force === true,
+      }, 15_000);
+      if (data.type !== "builtin_extensions_changed") {
+        throw new Error(optionalString(data.error) || "Pi SDK set builtin extensions failed");
+      }
+    } catch (error) {
+      this.builtinExtensionConfig = previous;
+      throw error;
+    }
+    this.builtinExtensionConfig = config;
   }
 
   async sendUIResponse(response: AgentUIResponse): Promise<void> {
@@ -1005,6 +1131,14 @@ export class PiSDKAgent {
   }
 
   async dispose(): Promise<void> {
+    // 先作废在途 init，再拆资源：否则 init 的 60s 定时器会让调用方一直等到超时。
+    this.initGeneration += 1;
+    await this.disposeInternal();
+  }
+
+  private async disposeInternal(): Promise<void> {
+    this.initReject?.(new Error("Pi SDK worker disposed during init"));
+    this.initReject = null;
     this.initPromise = null;
     this.initKey = null;
     this.clearTurnFallback();
@@ -1027,28 +1161,64 @@ export class PiSDKAgent {
     this.eventBuffer.flush();
     const child = this.process || this.processForCleanup;
     this.process = null;
-    this.processForCleanup = null;
+    // 等待 disposed ack 期间要保留来源，否则 handleWorkerMessage 会把 ack 当成
+    // 「已替换 worker 的杂散输出」丢弃。
+    this.processForCleanup = child;
     if (!child) return;
     if (child.stdin?.writable) {
-      try {
-        child.stdin.write(`${JSON.stringify({ type: "dispose" })}\n`);
-      } catch {
-        // Continue with forced termination below.
-      }
+      // worker 要回收后台子 Agent（stopAll 最多 2.5s + abort 0.8s），等它回
+      // disposed ack 再等进程退出；只等 1.5s 会必然强杀，Pi 会话收尾被截断。
+      await this.waitForDisposeAck(child, 4000);
     }
-    if (await this.waitForExit(child, 1500)) return;
+    if (await this.waitForExit(child, 1500)) {
+      this.processForCleanup = null;
+      return;
+    }
     if (process.platform === "win32" && child.pid) {
       await new Promise<void>((resolve) => {
         execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => resolve());
       });
     } else {
-      child.kill("SIGKILL");
+      // 先给 SIGTERM 一个收尾机会，再 SIGKILL。
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      if (!(await this.waitForExit(child, 1000))) {
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      }
     }
     await this.waitForExit(child, 500);
+    this.processForCleanup = null;
+  }
+
+  /**
+   * 发 dispose 并等 worker 回 disposed ack。
+   * 正常路径（没有后台任务）worker 立即回包，不会增加关闭耗时。
+   */
+  private waitForDisposeAck(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    const id = this.createCommandId();
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingResponses.delete(id);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      this.pendingResponses.set(id, () => finish(true));
+      try {
+        child.stdin?.write(`${JSON.stringify({ type: "dispose", id })}\n`);
+      } catch {
+        finish(false);
+      }
+    });
   }
 
   private interruptPiSubagents(reason: string) {
-    for (const [toolCallId, start] of this.piSubagentStarts.entries()) {
+    for (const [toolCallId, start] of [...this.piSubagentStarts.entries()]) {
+      // 后台子任务不随主回合 abort 终止（与 Claude Code 一致）；它们由
+      // subagent_stop / dispose 单独回收。
+      if (asRecord(start.args).background === true) continue;
       const results = getPiSubagentTaskItems(start.args).map((item) => ({
         agent: item.label,
         task: item.prompt,
@@ -1065,11 +1235,9 @@ export class PiSDKAgent {
         error: reason,
       }, start, true);
       this.emitEvent(event);
-    }
-    for (const toolCallId of this.piSubagentStarts.keys()) {
       this.piSubagentTerminalStates.set(toolCallId, "interrupted");
+      this.piSubagentStarts.delete(toolCallId);
     }
-    this.piSubagentStarts.clear();
   }
 
   private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
@@ -1090,7 +1258,7 @@ export class PiSDKAgent {
   }
 
   private handleWorkerMessage(data: unknown, sourceChild?: ChildProcess) {
-    if (sourceChild && this.process !== sourceChild) return;
+    if (sourceChild && this.process !== sourceChild && this.processForCleanup !== sourceChild) return;
     const record = asRecord(data);
     const messageId = record.id !== undefined && record.id !== null ? String(record.id) : "";
     if (messageId) {
@@ -1102,16 +1270,19 @@ export class PiSDKAgent {
     }
 
     switch (record.type) {
-      case "context_compaction":
-        if (record.phase === "started") {
+      case "context_compaction": {
+        const compactionPhase = typeof record.phase === "string" ? record.phase : "";
+        if (compactionPhase === "started") {
           this.compactionActive = true;
           // Pi can begin a long compaction after emitting agent_end. That is
           // continuation evidence, so the missing-prompt_done fallback must
           // not settle the turn while compaction is still running.
           this.clearTurnFallback();
-        } else {
+        } else if (compactionPhase) {
           this.compactionActive = false;
         }
+        // 无 phase 的是旧 SDK 的兜底事件（只知道「发生了压缩」）：只透传，
+        // 不改 compactionActive、不触发回合兜底，避免把正在跑的压缩提前收尾。
         this.emitEvent({
           type: "context_compaction",
           id: record.id,
@@ -1121,17 +1292,35 @@ export class PiSDKAgent {
           // 渲染层据此隐藏压缩期间的引导入口。
           postTurn: record.postTurn === true,
         });
-        if (record.phase !== "started") this.refreshAgentEndFallback();
+        if (compactionPhase && compactionPhase !== "started") this.refreshAgentEndFallback();
         break;
+      }
       case "history_snapshot":
         this.emitEvent({ type: "history_snapshot", messages: record.messages });
         break;
+      case "process_event": {
+        // worker / 扩展主动上报的流程条目（例如中止时取消待答问卷）。
+        // 问卷被取消时必须把 request id 从 pending 集合里摘掉，否则
+        // isIdle() 会一直为 false，后台任务完成后也收不到 idle。
+        const canceledRequestId = typeof record.requestId === "string" ? record.requestId : "";
+        if (canceledRequestId && record.state === "interrupted") {
+          this.pendingUIRequestIds.delete(canceledRequestId);
+        }
+        this.emitEvent(record);
+        break;
+      }
       case "turn_metadata":
         this.emitEvent({
           type: "turn_metadata",
           nativeTurnId: record.nativeTurnId,
           clientUserMessageId: record.clientUserMessageId,
         });
+        break;
+      case "model_changed":
+        // 即使 setModel 的内层 RPC 已经超时、pending handler 被删，迟到响应
+        // 也要把「运行时模型已切换」告诉渲染层，避免 UI 与实际模型分叉。
+        this.models = [];
+        this.emitEvent({ type: "model_changed", model: record.model });
         break;
       case "status": {
         const statusState = record.status === "error"
@@ -1168,12 +1357,22 @@ export class PiSDKAgent {
       // instead of when the guidance command resolves (which only queues it).
       // Emitting the response start only then keeps the guidance bubble from
       // landing in the middle of pre-guidance output.
-      case "guidance_delivered":
-        if (this.guidancePendingResponses > 0) {
-          this.guidancePendingResponses -= 1;
+      case "guidance_delivered": {
+        const deliveredGuidanceId = String(record.guidanceId || "");
+        if (deliveredGuidanceId) {
+          if (this.guidancePendingIds.delete(deliveredGuidanceId)) {
+            this.emitEvent({ type: "guidance_response_started" });
+          }
+          break;
+        }
+        // 旧 worker 不带 guidanceId：按入队顺序取第一条。
+        const [firstPendingGuidanceId] = this.guidancePendingIds;
+        if (firstPendingGuidanceId) {
+          this.guidancePendingIds.delete(firstPendingGuidanceId);
           this.emitEvent({ type: "guidance_response_started" });
         }
         break;
+      }
       case "message_update": {
         if (!this.turnActive && this.activePromptIds.size > 0) this.beginTurn();
         if (!this.turnActive) break;
@@ -1247,6 +1446,59 @@ export class PiSDKAgent {
         }
         this.refreshAgentEndFallback();
         break;
+      case "host_turn_started": {
+        // 后台任务完成后由 worker 拉起的新回合：没有用户消息，但和普通回合
+        // 一样占用 activePromptIds，直到 prompt_done 收尾。渲染层据此新建
+        // 一条只有助手内容的回合，并在前面插入系统提示。
+        const hostPromptId = String(record.id || "").trim();
+        if (!hostPromptId || this.activePromptIds.has(hostPromptId)) break;
+        this.prepareNewTurn();
+        // 宿主回合也要走正常的 turn 生命周期：零输出回合结束时 completeTurn
+        // 才有 turnActive 可收尾，不会只靠 5s 的 idle 探测。
+        this.beginTurn();
+        this.activePromptIds.add(hostPromptId);
+        this.emitEvent({
+          type: "host_turn_started",
+          id: hostPromptId,
+          reason: record.reason === "subagent_result" ? "subagent_result" : undefined,
+          taskIds: Array.isArray(record.taskIds)
+            ? record.taskIds.map((value) => String(value || "")).filter(Boolean)
+            : [],
+          ...(typeof record.clientUserMessageId === "string" ? { clientUserMessageId: record.clientUserMessageId } : {}),
+        });
+        break;
+      }
+      case "plan_update":
+        // 后台子 Agent 的 todo 状态变更不在任何 tool_call 里，直接透传给渲染层。
+        // background 必须一起透传：渲染层据此判断只更新既有消息，不新开回合。
+        this.emitEvent({
+          type: "plan_update",
+          steps: Array.isArray(record.steps) ? record.steps : [],
+          ...(record.background === true ? { background: true } : {}),
+        });
+        break;
+      case "subagent_background": {
+        // 后台子任务事件不走 activePromptId 闸门：派发它的工具调用早已返回，
+        // 主回合可能已结束，但任务仍在跑。backend 只负责把它转成普通的
+        // subagent_event，并带上 background 标记；生命周期由 registry 接管。
+        const toolCallId = String(record.toolCallId || record.id || "pi-subagent-background");
+        const start = this.piSubagentStarts.get(toolCallId) || {
+          startedAt: Date.now(),
+          args: asRecord(record.args),
+          action: "spawnAgent",
+        };
+        this.piSubagentStarts.set(toolCallId, start);
+        const terminal = isRecord(record.result);
+        const backgroundEvent = buildPiSubagentEvent({ ...record, toolCallId }, start, terminal);
+        this.emitEvent(backgroundEvent);
+        if (terminal) {
+          // 终态要登记：否则后续重放/迟到事件会再造一条「已完成」，耗时也会被重置。
+          const terminalState = normalizeNativeSubagentStatus(asRecord(backgroundEvent).state) || "completed";
+          this.piSubagentTerminalStates.set(toolCallId, terminalState);
+          this.piSubagentStarts.delete(toolCallId);
+        }
+        break;
+      }
       case "tool_execution_start": {
         this.clearTurnFallback();
         const toolCallId = String(record.toolCallId || record.callId || record.id || "").trim();
@@ -1360,6 +1612,8 @@ export class PiSDKAgent {
         if (messageId && !this.activePromptIds.delete(messageId)) break;
         if (!messageId) this.activePromptIds.clear();
         this.pendingUIRequestIds.clear();
+        // 回合真正结束：没交付的引导不会再有 delivered 事件。
+        this.guidancePendingIds.clear();
         // Pi 1.1.0 起 agent_settled 带 aborted，能区分「跑完」和「被取消」。
         // 用户主动停止时 abort() 已经发过 aborted 并清了 turnActive，这里会直接返回；
         // 只有 SDK 侧单方面取消（本轮没结束就作废）才会走到这，按取消收尾，
@@ -1373,9 +1627,8 @@ export class PiSDKAgent {
         break;
       case "agent_end":
         this.agentEndObserved = true;
-        // worker 在回合结束时也清零了计数；这里同步一下，免得没交付的引导把
-        // 计数漏到下一轮，凭空多发一个 guidance_response_started。
-        this.guidancePendingResponses = 0;
+        // 不清 guidancePendingIds：agent_end 不是终态，Pi 之后还可能 continue()
+        // 消费队列里的引导；真正的清理在 prompt_done / abort。
         if (this.pendingUIRequestIds.size === 0) this.scheduleTurnFallback(4000, true);
         break;
       case "error":
@@ -1401,6 +1654,13 @@ export class PiSDKAgent {
           state: "error",
         });
         this.completeTurn(true);
+        break;
+      default:
+        // 没有 default 时新增事件会被静默吞掉，排查 UI 卡住非常困难。
+        // 不在默认分支转发未知事件（可能没有渲染契约），但开发期至少留下日志。
+        if (process.env.HPP_PI_DEBUG_EVENTS === "1") {
+          console.warn("[pi] unhandled worker event:", record.type);
+        }
         break;
     }
   }
@@ -1566,30 +1826,34 @@ export class PiSDKAgent {
     this.clearTurnFallback();
     for (const toolCallId of this.activeToolCallIds) this.ignoredToolCallIds.add(toolCallId);
     this.activeToolCallIds.clear();
-    if (this.pendingAssistantError) {
-      this.emitEvent({
-        type: "process_event",
-        entryType: "error",
-        kind: "error",
-        title: "模型请求失败",
-        detail: this.pendingAssistantError,
-        state: "error",
-      });
+    try {
+      if (this.pendingAssistantError) {
+        this.emitEvent({
+          type: "process_event",
+          entryType: "error",
+          kind: "error",
+          title: "模型请求失败",
+          detail: this.pendingAssistantError,
+          state: "error",
+        });
+        this.pendingAssistantError = "";
+      }
+      this.eventBuffer.flush();
+      this.emitPendingAssistantText();
+      this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
+      this.emitEvent({ type: "agent_end" });
+    } finally {
+      // 事件转发失败不能把 turnActive 留在 true：那会让会话永久卡在“运行中”。
+      this.pendingAssistantText = "";
       this.pendingAssistantError = "";
+      this.streamedText = false;
+      this.streamedTextBuffer = "";
+      this.streamedMessageTextBuffer = "";
+      this.pendingAssistantTextNeedsEmit = false;
+      this.turnActive = false;
+      this.agentEndObserved = false;
+      this.turnToken += 1;
     }
-    this.eventBuffer.flush();
-    this.emitPendingAssistantText();
-    this.emitEvent({ type: "stream_end", content: this.pendingAssistantText, force });
-    this.emitEvent({ type: "agent_end" });
-    this.pendingAssistantText = "";
-    this.pendingAssistantError = "";
-    this.streamedText = false;
-    this.streamedTextBuffer = "";
-    this.streamedMessageTextBuffer = "";
-    this.pendingAssistantTextNeedsEmit = false;
-    this.turnActive = false;
-    this.agentEndObserved = false;
-    this.turnToken += 1;
   }
 
   private emitPendingAssistantText() {
@@ -1657,7 +1921,12 @@ export class PiSDKAgent {
     this.process = null;
     this.isReady = false;
     const error = detail || title;
-    if (!this.isAborting) this.interruptPiSubagents(error);
+    if (!this.isAborting) {
+      this.interruptPiSubagents(error);
+      // worker 崩溃或管道断开时，它派生的后台子 Agent 可能还活着：
+      // 兜底回收整棵树，不能只等 worker 自己退出。
+      killChildTree(child);
+    }
     const handlers = [...this.pendingResponses.values()];
     this.pendingResponses.clear();
     for (const handler of handlers) handler({ type: "error", error });
@@ -1681,7 +1950,13 @@ export class PiSDKAgent {
   }
 
   private emitEvent(data: unknown) {
-    this.eventBuffer.send(data);
+    // 事件转发失败（序列化/超限/渲染层异常）不能打断调用方的状态清理：
+    // completeTurn、prompt_done 等路径都依赖 emit 后的代码。
+    try {
+      this.eventBuffer.send(data);
+    } catch (error) {
+      console.error("[pi] failed to emit agent event:", error instanceof Error ? error.message : String(error));
+    }
   }
 
   private emitEventThrottled(data: { type: string; [key: string]: unknown }) {

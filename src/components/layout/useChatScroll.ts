@@ -19,6 +19,24 @@ const POINTER_SCROLL_INTENT_THRESHOLD = 2;
 const LAYOUT_CHANGE_GUARD_MS = 800;
 const USER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
 
+/** 容器实际可滚动的余量：内容比视口高多少。 */
+const getScrollOverflow = (el: HTMLElement) => Math.max(0, el.scrollHeight - el.clientHeight);
+
+/**
+ * 「返回底部」只在真的有地方可回时才显示。
+ *
+ * 两个条件缺一不可：
+ * 1. 容器有可滚动余量。内容一屏就放得下时（新会话、短回答），
+ *    `distance` 恒为 0，但用户滚一下滚轮/方向键就会把自动跟随关掉——
+ *    以前用 `!autoFollow` 兜底，于是没有下方内容也会冒出按钮。
+ * 2. 视口确实离开底部超过阈值。差几十像素不算「翻上去了」，
+ *    点一下只滚回原位，按钮反而挡视线。
+ */
+export function shouldShowScrollBottom(distanceFromBottom: number, scrollOverflow: number): boolean {
+  if (scrollOverflow <= AUTO_FOLLOW_BOTTOM_EPSILON) return false;
+  return distanceFromBottom > SCROLL_BOTTOM_THRESHOLD;
+}
+
 export function useChatScroll({
   activeSessionId,
   activeSessionInitialized,
@@ -51,8 +69,11 @@ export function useChatScroll({
 
   const updateScrollBottomState = useCallback((el = scrollRef.current) => {
     if (!el) return false;
-    const awayFromBottom = getDistanceFromScrollBottom(el) > SCROLL_BOTTOM_THRESHOLD;
-    setShowScrollBottom(awayFromBottom || !autoFollowBottomRef.current);
+    const distance = getDistanceFromScrollBottom(el);
+    const awayFromBottom = distance > SCROLL_BOTTOM_THRESHOLD;
+    // 显隐只由「能滚 + 真的离开了底部」决定：autoFollow 只影响后续内容是否跟随，
+    // 不能拿它当按钮的显示条件，否则滚不动的短会话也会亮起按钮。
+    setShowScrollBottom(shouldShowScrollBottom(distance, getScrollOverflow(el)));
     return awayFromBottom;
   }, [getDistanceFromScrollBottom]);
 
@@ -83,6 +104,11 @@ export function useChatScroll({
     return operation;
   }, [beginScrollOperation]);
   const startUserScroll = useCallback(() => {
+    // 没有可滚动余量时，滚轮 / 方向键 / 点滚动条都改不动视图。
+    // 这时候不能判定「用户要离开底部」：否则下一段流式内容不再跟随，
+    // 按钮也会在没有下方内容的情况下亮起来。
+    const el = scrollRef.current;
+    if (el && getScrollOverflow(el) <= AUTO_FOLLOW_BOTTOM_EPSILON) return;
     const operation = beginScrollOperation();
     userScrollInProgressRef.current = true;
     userScrollOperationRef.current = operation;
@@ -91,7 +117,8 @@ export function useChatScroll({
     // Otherwise a streaming ResizeObserver callback can pull the viewport back down
     // between the input event and the resulting scroll event.
     autoFollowBottomRef.current = false;
-    setShowScrollBottom(true);
+    // 按钮显隐交给滚完之后的真实距离判定，这里不抢先点亮：
+    // 抢跑会在「滚了但没滚出阈值」时闪一下，也会在滚不动时误亮。
   }, [beginScrollOperation]);
 
   const keepAtBottom = useCallback((el = scrollRef.current) => {

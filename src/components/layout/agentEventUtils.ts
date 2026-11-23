@@ -813,7 +813,7 @@ export const isPlanLikeProcessEvent = (event: AgentEvent) => {
   );
 };
 
-export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep[] => {
+export const getPlanStepsSnapshotFromEvent = (event: AgentEvent): AgentProcessStep[] | null => {
   const detail = asRecord(event.detail);
   const args = asRecord(event.args);
   const input = asRecord(event.input);
@@ -837,8 +837,9 @@ export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep
   ];
 
   for (const candidate of candidates) {
-    const steps = normalizePlanSteps(candidate);
-    if (steps.length > 0) return steps;
+    if (!Array.isArray(candidate)) continue;
+    // 显式空数组表示「清空计划」，不能当成「没有计划数据」丢弃。
+    return normalizePlanSteps(candidate);
   }
 
   if (typeof event.detail === "string") {
@@ -850,8 +851,12 @@ export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep
     if (steps.length > 0) return steps;
   }
 
-  return [];
+  return null;
 };
+
+export const normalizePlanStepsFromEvent = (event: AgentEvent): AgentProcessStep[] => (
+  getPlanStepsSnapshotFromEvent(event) || []
+);
 
 /**
  * Extract a structured task snapshot from a completed tool result.
@@ -896,7 +901,7 @@ export const getTodoPlanStepIdsFromToolResult = (event: AgentEvent): string[] =>
   return ids;
 };
 
-export const normalizePlanStepsFromToolResult = (event: AgentEvent): AgentProcessStep[] => {
+export const getPlanStepsSnapshotFromToolResult = (event: AgentEvent): AgentProcessStep[] | null => {
   const detail = asRecord(event.detail);
   const eventDetails = asRecord(event.details);
   const result = asRecord(event.result);
@@ -917,12 +922,17 @@ export const normalizePlanStepsFromToolResult = (event: AgentEvent): AgentProces
   ];
 
   for (const candidate of candidates) {
-    const steps = normalizePlanSteps(candidate);
-    if (steps.length > 0) return steps;
+    if (!Array.isArray(candidate)) continue;
+    // 空数组是显式清空快照；不能和「没有 tasks 字段」混为一谈。
+    return normalizePlanSteps(candidate);
   }
 
-  return [];
+  return null;
 };
+
+export const normalizePlanStepsFromToolResult = (event: AgentEvent): AgentProcessStep[] => (
+  getPlanStepsSnapshotFromToolResult(event) || []
+);
 
 export const normalizeChangeSummaryFileKey = (filePath: string) =>
   filePath.replace(/\\/g, "/").trim().toLowerCase();

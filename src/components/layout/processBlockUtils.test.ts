@@ -6,6 +6,7 @@ import type {
 } from "@/stores/chat-store";
 import {
   getStepProgressText,
+  getSubagentDisplayTitle,
   getSubagentSummaryText,
   getSubagentTitle,
   normalizeInferredStepsForDisplay,
@@ -158,6 +159,25 @@ describe("getSubagentTitle", () => {
     const title = getSubagentTitle(`请${"做一件事".repeat(20)}`);
     expect(title.length).toBe(41);
     expect(title.endsWith("…")).toBe(true);
+  });
+});
+
+describe("getSubagentDisplayTitle", () => {
+  it("shrinks a scheduler-supplied title too", () => {
+    // claude 的 Task 没有独立 title 参数，description 常常就是一句话。
+    expect(getSubagentDisplayTitle({ title: "请独立编写行为测试" })).toBe("编写测试");
+    expect(getSubagentDisplayTitle({ title: "全项目剩余动态红点迁移C组" })).toBe("红点迁移C组");
+  });
+
+  it("keeps an already-minimal title untouched", () => {
+    expect(getSubagentDisplayTitle({ title: "审查风险" })).toBe("审查风险");
+    expect(getSubagentDisplayTitle({ title: "补齐静态红点" })).toBe("补齐静态红点");
+  });
+
+  it("falls back to the prompt when no title was given", () => {
+    expect(getSubagentDisplayTitle({ prompt: "请审查迁移回归风险，不改生产文件" })).toBe("审查风险");
+    expect(getSubagentDisplayTitle({ label: "Explore" })).toBe("Explore");
+    expect(getSubagentDisplayTitle({})).toBe("");
   });
 });
 

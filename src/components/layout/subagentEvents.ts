@@ -111,6 +111,10 @@ const parseSubagent = (
     prompt: getFirstString(value, ["prompt", "task", "request"]),
     ...(stopReason ? { stopReason } : {}),
     ...(usage ? { usage } : {}),
+    ...(value.background === true ? { background: true } : {}),
+    ...(getFirstString(value, ["taskId", "task_id"]) ? { taskId: getFirstString(value, ["taskId", "task_id"]) } : {}),
+    ...(getFirstString(value, ["resultFile", "result_file"]) ? { resultFile: getFirstString(value, ["resultFile", "result_file"]) } : {}),
+    ...(Number(value.rounds) > 0 ? { rounds: Number(value.rounds) } : {}),
     ...pickTimestamps(value),
   };
 };

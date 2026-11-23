@@ -741,4 +741,12 @@ describe("getEffectiveProcessSubagents", () => {
     // 老数据没有状态字段时不敢当幽灵删。
     expect(getEffectiveProcessSubagents([{ id: "x", label: "X" }], "completed")).toHaveLength(1);
   });
+
+  it("keeps running background subagents after the dispatching entry is terminal", () => {
+    const subagents = [
+      { id: "sa_1:1", label: "sa_1", status: "running" as const, background: true },
+      { id: "a", label: "a", status: "running" as const },
+    ];
+    expect(getEffectiveProcessSubagents(subagents, "completed").map((item) => item.id)).toEqual(["sa_1:1"]);
+  });
 });

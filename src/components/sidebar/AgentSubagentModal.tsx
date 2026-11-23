@@ -294,8 +294,8 @@ export function AgentSubagentModal({
       // 的快照 —— 热更新只会改校验用的配置，模型看不到新加的候选，等于白配。
       // 开关也算在内：关掉后说明里还挂着候选，派发方会照旧传 model。
       const enablingFromDisabled = !config.enabled && normalized.enabled;
-      const poolConfigChanged = JSON.stringify({ on: config.poolEnabled, pool: config.pool || [] })
-        !== JSON.stringify({ on: normalized.poolEnabled, pool: normalized.pool });
+      const poolConfigChanged = JSON.stringify({ on: config.poolEnabled, pool: config.pool || [], background: config.backgroundEnabled })
+        !== JSON.stringify({ on: normalized.poolEnabled, pool: normalized.pool, background: normalized.backgroundEnabled });
       const applyConfig = window.electronAPI.agentSetAgentSubagentConfig;
       if (!enablingFromDisabled && !poolConfigChanged && typeof applyConfig === "function") {
         const applied = await applyConfig(agentId, normalized);
@@ -390,142 +390,254 @@ export function AgentSubagentModal({
           {loading ? (
             <div className="agent-config-empty">读取 SubAgent 设置中...</div>
           ) : (
-            <div className="settings-subagent-body">
-              <label className="settings-general-row settings-general-toggle settings-subagent-enabled">
-                <span className="settings-general-row-main">
-                  <strong>启用 SubAgent</strong>
-                  <span>关闭后不注册 Hpp 内置 subagent 工具，不影响用户安装的同名扩展</span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={config.enabled}
-                  onChange={(event) => updateConfig({ ...config, enabled: event.target.checked })}
-                  aria-label="启用 SubAgent"
-                />
-              </label>
+            <div className={`settings-subagent-body${supportsModelPool ? "" : " settings-subagent-body-single"}`}>
+              <div className="settings-subagent-grid">
+                <div className="settings-subagent-column">
+                  {/* 两个总开关压成一行小开关：说明移到 title，省下两行正文的高度。 */}
+                  <div className="settings-subagent-switches">
+                    <label
+                      className="settings-subagent-switch"
+                      title="关闭后不注册 Hpp 内置 subagent 工具，不影响用户安装的同名扩展"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={config.enabled}
+                        onChange={(event) => updateConfig({ ...config, enabled: event.target.checked })}
+                        aria-label="启用 SubAgent"
+                      />
+                      <span>启用 SubAgent</span>
+                    </label>
 
-              {supportsModelPool && (
-                <label className="settings-general-row settings-general-toggle settings-subagent-row settings-subagent-pool-switch">
-                  <span className="settings-general-row-main">
-                    <strong>启用模型池</strong>
-                    <span>
-                      {config.poolEnabled
-                        ? "派发任务时主 Agent 按每个任务的难度在池内挑模型；未指定时用第一项"
-                        : "已关闭：所有 subagent 跟随主 Agent 当前模型，池内配置保留"}
-                    </span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={config.poolEnabled}
-                    disabled={!config.enabled}
-                    onChange={(event) => updateConfig({ ...config, poolEnabled: event.target.checked })}
-                    aria-label="启用模型池"
-                  />
-                </label>
-              )}
-
-              {supportsModelPool && (
-                <div className="settings-subagent-pool">
-                  <div className="settings-subagent-section-header">
-                    <span className="settings-subagent-section-title">模型池</span>
-                    <span className="settings-subagent-pool-hint">
-                      第一项是默认起点；上下文窗口、推理/视觉能力、价格会自动带上，不用手填
-                    </span>
+                    {supportsModelPool && (
+                      <label
+                        className="settings-subagent-switch"
+                        title={config.poolEnabled
+                          ? "默认用第一项；只有检索量大、需要视觉/长窗口或交叉审查时才单独指定"
+                          : "已关闭：所有 subagent 跟随主 Agent 当前模型，池内配置保留"}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={config.poolEnabled}
+                          disabled={!config.enabled}
+                          onChange={(event) => updateConfig({ ...config, poolEnabled: event.target.checked })}
+                          aria-label="启用模型池"
+                        />
+                        <span>启用模型池</span>
+                        {!config.poolEnabled && (
+                          <em className="settings-subagent-switch-note">跟随主 Agent</em>
+                        )}
+                      </label>
+                    )}
                   </div>
 
-                  {pool.map((entry, index) => (
-                    <div className="settings-subagent-pool-row" key={entry.model}>
-                      <span className="settings-subagent-pool-index" title={index === 0 ? "默认起点" : undefined}>
-                        {index + 1}
-                      </span>
-                      <AgentSubagentModelPicker
-                        value={entry.model}
-                        options={availableModels}
-                        disabled={!config.enabled}
-                        emptyLabel="选择模型"
-                        onChange={(model) => {
-                          if (!model) handlePoolRemove(entry.model);
-                          else if (!pool.some((item) => item.model === model)) {
-                            handlePoolUpdate(entry.model, {
-                              model,
-                              label: availableModels.find((item) => item.value === model)?.name,
-                            });
-                          }
-                        }}
-                        ariaLabel={`模型池第 ${index + 1} 项`}
-                      />
-                      {index > 0 ? (
+                  {supportsModelPool && (
+                    <div className="settings-subagent-pool">
+                      <div className="settings-subagent-section-header">
+                        <span className="settings-subagent-section-title">模型池</span>
+                        <span className="settings-subagent-pool-hint">
+                          第一项是默认起点；上下文窗口、推理/视觉能力、价格会自动带上，不用手填
+                        </span>
+                      </div>
+
+                      {pool.map((entry, index) => (
+                        <div className="settings-subagent-pool-row" key={entry.model}>
+                          <span className="settings-subagent-pool-index" title={index === 0 ? "默认起点" : undefined}>
+                            {index + 1}
+                          </span>
+                          <AgentSubagentModelPicker
+                            value={entry.model}
+                            options={availableModels}
+                            disabled={!config.enabled}
+                            emptyLabel="选择模型"
+                            onChange={(model) => {
+                              if (!model) handlePoolRemove(entry.model);
+                              else if (!pool.some((item) => item.model === model)) {
+                                handlePoolUpdate(entry.model, {
+                                  model,
+                                  label: availableModels.find((item) => item.value === model)?.name,
+                                });
+                              }
+                            }}
+                            ariaLabel={`模型池第 ${index + 1} 项`}
+                          />
+                          {index > 0 ? (
+                            <button
+                              type="button"
+                              className="settings-subagent-pool-action"
+                              onClick={() => handlePoolPromote(entry.model)}
+                              disabled={!config.enabled}
+                              title="设为默认起点"
+                              aria-label={`把 ${entry.model} 设为默认起点`}
+                            >
+                              <ArrowUp size={13} />
+                            </button>
+                          ) : (
+                            <span className="settings-subagent-pool-action placeholder" aria-hidden="true" />
+                          )}
+                          <button
+                            type="button"
+                            className="settings-subagent-pool-action"
+                            onClick={() => handlePoolRemove(entry.model)}
+                            disabled={!config.enabled}
+                            title="从模型池移除"
+                            aria-label={`从模型池移除 ${entry.model}`}
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ))}
+
+                      {addingPoolModel && (
+                        <div className="settings-subagent-pool-row pending">
+                          <span className="settings-subagent-pool-index">+</span>
+                          <AgentSubagentModelPicker
+                            value=""
+                            options={availableModels}
+                            disabled={!config.enabled}
+                            emptyLabel="选择要加入的模型"
+                            onChange={(model) => {
+                              setAddingPoolModel(false);
+                              handlePoolAdd(model);
+                            }}
+                            ariaLabel="添加模型到模型池"
+                          />
+                          <span className="settings-subagent-pool-pending">选择后自动加入；再次点击可取消</span>
+                        </div>
+                      )}
+
+                      {pool.length < MAX_AGENT_SUBAGENT_POOL_ENTRIES && !addingPoolModel && (
                         <button
                           type="button"
-                          className="settings-subagent-pool-action"
-                          onClick={() => handlePoolPromote(entry.model)}
+                          className="settings-subagent-pool-add"
+                          onClick={() => setAddingPoolModel(true)}
                           disabled={!config.enabled}
-                          title="设为默认起点"
-                          aria-label={`把 ${entry.model} 设为默认起点`}
                         >
-                          <ArrowUp size={13} />
+                          <Plus size={13} />
+                          添加模型
                         </button>
-                      ) : (
-                        <span className="settings-subagent-pool-action placeholder" aria-hidden="true" />
                       )}
-                      <button
-                        type="button"
-                        className="settings-subagent-pool-action"
-                        onClick={() => handlePoolRemove(entry.model)}
-                        disabled={!config.enabled}
-                        title="从模型池移除"
-                        aria-label={`从模型池移除 ${entry.model}`}
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  ))}
-
-                  {addingPoolModel && (
-                    <div className="settings-subagent-pool-row pending">
-                      <span className="settings-subagent-pool-index">+</span>
-                      <AgentSubagentModelPicker
-                        value=""
-                        options={availableModels}
-                        disabled={!config.enabled}
-                        emptyLabel="选择要加入的模型"
-                        onChange={(model) => {
-                          setAddingPoolModel(false);
-                          handlePoolAdd(model);
-                        }}
-                        ariaLabel="添加模型到模型池"
-                      />
-                      <span className="settings-subagent-pool-pending">选择后自动加入；再次点击可取消</span>
                     </div>
                   )}
 
-                  {pool.length < MAX_AGENT_SUBAGENT_POOL_ENTRIES && !addingPoolModel && (
-                    <button
-                      type="button"
-                      className="settings-subagent-pool-add"
-                      onClick={() => setAddingPoolModel(true)}
-                      disabled={!config.enabled}
-                    >
-                      <Plus size={13} />
-                      添加模型
-                    </button>
+                  {/* 说明跟着模型池放在左列：右列更高，放这里不额外撑高弹窗。 */}
+                  {supportsModelPool && pool.length < 2 && (
+                    <p className="settings-compaction-note">
+                      {pool.length === 0
+                        ? "池是空的：subagent 会跟随主 Agent 当前模型，和关掉开关没区别。"
+                        : "池里只有一个模型时没有可挑的空间：默认就用它。至少放两个模型，才可能在需要视觉、长窗口或交叉审查时换模型。"}
+                    </p>
+                  )}
+
+                  <p className="settings-compaction-note">
+                    模型默认用池内第一项，只有明确理由（大批量检索、看图、长窗口、交叉审查）才单独指定；
+                    关掉模型池则全部跟随主 Agent。markdown 里钉死的 model 固定不可改。
+                  </p>
+                </div>
+                <div className="settings-subagent-column">
+                  {supportsModelPool && (
+                    <div className="settings-subagent-pool settings-subagent-pool-plain">
+                      <div className="settings-subagent-section-header">
+                        <span className="settings-subagent-section-title">后台与自动继续</span>
+                        <span className="settings-subagent-pool-hint">
+                          后台任务不阻塞主 Agent；结果完成时通知主会话
+                        </span>
+                      </div>
+
+                      <label className="settings-general-row settings-general-toggle settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>允许后台派发</strong>
+                          <span>开启后 subagent 工具支持 background:true，立即返回任务 id</span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={config.backgroundEnabled}
+                          disabled={!config.enabled}
+                          onChange={(event) => updateConfig({ ...config, backgroundEnabled: event.target.checked })}
+                          aria-label="允许后台派发"
+                        />
+                      </label>
+
+                      <label className="settings-general-row settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>最大并发</strong>
+                          <span>同步与后台任务共享；超出后进入排队（1~8）</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={8}
+                          value={config.maxConcurrency}
+                          disabled={!config.enabled}
+                          onChange={(event) => updateConfig({ ...config, maxConcurrency: Number(event.target.value) })}
+                          aria-label="子任务最大并发"
+                        />
+                      </label>
+
+                      <label className="settings-general-row settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>后台任务超时（分钟）</strong>
+                          <span>默认 120 分钟；同步任务不设超时</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={120}
+                          value={Math.round(config.backgroundTimeoutMs / 60000)}
+                          disabled={!config.enabled || !config.backgroundEnabled}
+                          onChange={(event) => updateConfig({ ...config, backgroundTimeoutMs: Number(event.target.value) * 60000 })}
+                          aria-label="后台任务超时分钟数"
+                        />
+                      </label>
+
+                      <label className="settings-general-row settings-general-toggle settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>完成后自动唤醒</strong>
+                          <span>主 Agent 空闲时，后台结果自动开一个新回合继续（关闭则等下一条消息）</span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={config.autoWakeOnResult}
+                          disabled={!config.enabled || !config.backgroundEnabled}
+                          onChange={(event) => updateConfig({ ...config, autoWakeOnResult: event.target.checked })}
+                          aria-label="后台任务完成后自动唤醒主 Agent"
+                        />
+                      </label>
+
+                      <label className="settings-general-row settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>合并唤醒窗口（秒）</strong>
+                          <span>窗口内结束的多个任务合并成一次通知</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={Math.round(config.autoWakeDebounceMs / 1000)}
+                          disabled={!config.enabled || !config.backgroundEnabled || !config.autoWakeOnResult}
+                          onChange={(event) => updateConfig({ ...config, autoWakeDebounceMs: Number(event.target.value) * 1000 })}
+                          aria-label="合并唤醒窗口秒数"
+                        />
+                      </label>
+
+                      <label className="settings-general-row settings-subagent-row">
+                        <span className="settings-general-row-main">
+                          <strong>连续自动唤醒上限</strong>
+                          <span>没有用户输入时最多自动继续几轮，避免空转烧钱</span>
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10}
+                          value={config.maxAutoWakeTurns}
+                          disabled={!config.enabled || !config.backgroundEnabled || !config.autoWakeOnResult}
+                          onChange={(event) => updateConfig({ ...config, maxAutoWakeTurns: Number(event.target.value) })}
+                          aria-label="连续自动唤醒上限"
+                        />
+                      </label>
+                    </div>
                   )}
                 </div>
-              )}
-
-              {supportsModelPool && pool.length < 2 && (
-                <p className="settings-compaction-note">
-                  {pool.length === 0
-                    ? "池是空的：subagent 会跟随主 Agent 当前模型，和关掉开关没区别。"
-                    : "池里只有一个模型时没有可挑的空间：派发方只有一个选择，「按难度挑」不会发生。至少放两个模型才有意义。"}
-                </p>
-              )}
-
-              <p className="settings-compaction-note">
-                模型在派发时确定、整个子任务不变。派发方会看到每个模型的上下文窗口、推理/视觉能力和价格，
-                由它自己按任务轻重挑；不指定则用池内第一项，关掉模型池则全部跟随主 Agent。
-                markdown 里钉死的 model 固定不可改。
-              </p>
+              </div>
               <div className="settings-compaction-actions">
                 {status && (
                   <span className={`settings-compaction-status ${status.type}`}>{status.text}</span>

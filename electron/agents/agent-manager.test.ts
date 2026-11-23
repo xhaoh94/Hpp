@@ -553,11 +553,13 @@ describe("AgentManager plugin removal", () => {
       appliedSessionIds: ["subagent-session"],
     });
     // 热更新直接下发到运行中的会话，无需重载；未声明能力的 agent 不受影响。
-    expect(piBackend.setSubagentConfig).toHaveBeenCalledWith({
+    expect(piBackend.setSubagentConfig).toHaveBeenCalledWith(expect.objectContaining({
       enabled: true,
       poolEnabled: true,
       pool: [{ model: "provider/scout" }],
-    });
+      backgroundEnabled: true,
+      maxConcurrency: 4,
+    }));
     expect(otherBackend.setSubagentConfig).not.toHaveBeenCalled();
   });
 

@@ -20,11 +20,16 @@ vi.mock("electron", () => ({
 describe("store handlers", () => {
   let tempRoot = "";
   let closeStoreDatabases = () => {};
+  const originalHppDataDir = process.env.HPP_DATA_DIR;
 
   beforeEach(async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "hpp-store-"));
     electronState.userDataDir = tempRoot;
     electronState.handlers.clear();
+    // 模块级常量会优先读 HPP_DATA_DIR（生产由 main.ts 设置）。开发机上这个
+    // 环境变量常已存在，不覆盖的话 pi-subagents 目录会指向真实用户目录，
+    // 清理类断言就会在临时目录里查一个永远不会被删的目录。
+    process.env.HPP_DATA_DIR = join(tempRoot, "hpp-data");
     vi.resetModules();
     const storeModule = await import("./store-handlers");
     closeStoreDatabases = storeModule.closeStoreDatabases;
@@ -33,6 +38,8 @@ describe("store handlers", () => {
 
   afterEach(async () => {
     closeStoreDatabases();
+    if (originalHppDataDir === undefined) delete process.env.HPP_DATA_DIR;
+    else process.env.HPP_DATA_DIR = originalHppDataDir;
     await rm(tempRoot, { recursive: true, force: true });
   });
 
@@ -157,11 +164,21 @@ describe("store handlers", () => {
       await save({}, key, value);
       await save({}, key, value);
     }
+    const subagentRoot = join(tempRoot, "hpp-data", "pi-subagents");
+    for (const sessionId of ["kept", "removed", "project-session"]) {
+      await mkdir(join(subagentRoot, sessionId), { recursive: true });
+      await writeFile(join(subagentRoot, sessionId, "sa_1.result.md"), sessionId, "utf8");
+    }
 
     await expect(purge({}, {
       sessionIds: ["removed", "project-session"],
       projectIds: ["removed-project"],
     })).resolves.toEqual({ success: true });
+
+    // Pi 后台子 Agent 的会话/结果目录随父会话一起删除，保留的会话不受影响。
+    await expect(stat(join(subagentRoot, "removed"))).rejects.toThrow();
+    await expect(stat(join(subagentRoot, "project-session"))).rejects.toThrow();
+    expect((await stat(join(subagentRoot, "kept"))).isDirectory()).toBe(true);
 
     expect(loadMessages({}, "kept")).toEqual([{ id: "kept-message", content: "keep" }]);
     expect(loadMessages({}, "removed")).toBeNull();
@@ -187,11 +204,17 @@ describe("store handlers", () => {
     await saveMessages({}, "kept", { replace: true, upserts: [] });
     await saveMessages({}, "orphan", { replace: true, upserts: [{ message: { id: "orphan-message", content: "old" }, sequence: 0 }] });
     await save({}, "currentModel", { models: { kept: {}, orphan: {} }, thinkingLevels: { orphan: "high" } });
+    const subagentRoot = join(tempRoot, "hpp-data", "pi-subagents");
+    await mkdir(join(subagentRoot, "orphan"), { recursive: true });
+    await mkdir(join(subagentRoot, "kept"), { recursive: true });
 
     await purge({}, { validSessionIds: ["kept"], validProjectIds: [] });
 
     expect(loadMessages({}, "kept")).toEqual([]);
     expect(loadMessages({}, "orphan")).toBeNull();
+    // 全量清理时把不在有效会话集合里的子 Agent 目录也删掉。
+    await expect(stat(join(subagentRoot, "orphan"))).rejects.toThrow();
+    expect((await stat(join(subagentRoot, "kept"))).isDirectory()).toBe(true);
     const storedModels = JSON.parse(await readFile(join(tempRoot, "hpp-data", "currentModel.json"), "utf8"));
     expect(storedModels.models).toEqual({ kept: {} });
     expect(storedModels.thinkingLevels).toEqual({});

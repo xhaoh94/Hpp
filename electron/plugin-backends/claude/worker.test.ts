@@ -81,6 +81,27 @@ class FakeQuery {
         const input = { description: "No result task", prompt: "Return a marker.", subagent_type: "explore" };
         this.enqueue({ type: "assistant", uuid: "assistant-task-empty", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "task-tool-empty", name: "Task", input }] } });
         this.enqueue({ type: "user", uuid: "task-result-empty", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "task-tool-empty", content: JSON.stringify(input) }] }, tool_use_result: { agentId: "agent-empty", agentType: "explore", status: "completed" } });
+      } else if (text === "background-bash") {
+        // 超过 60s 被挪到后台的 Bash：Claude 会照常发 local_bash 的 task_started /
+        // task_notification（TaskStop 后是 stopped）。它不是子 Agent。
+        this.enqueue({ type: "assistant", uuid: "assistant-bash", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "tool_use", id: "bash-tool-1", name: "Bash", input: { command: "grep -rn hppPresentExtension" } }] } });
+        this.enqueue({ type: "system", subtype: "task_started", task_id: "bash-task-1", tool_use_id: "bash-tool-1", task_type: "local_bash", description: "确认 present 扩展引用并定位 pi SDK 安装", session_id: this.sessionId });
+        this.enqueue({ type: "system", subtype: "task_notification", task_id: "bash-task-1", tool_use_id: "bash-tool-1", status: "stopped", session_id: this.sessionId });
+        this.enqueue({ type: "user", uuid: "bash-result", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "bash-tool-1", content: "Command did not complete within its 60s timeout" }] }, tool_use_result: { stdout: "", stderr: "", interrupted: false } });
+      } else if (text === "usage-progress") {
+        // 一条响应会被拆成多帧（thinking / text / tool_use），每帧带同一份 usage。
+        const frame = (messageId, block, usage) => this.enqueue({
+          type: "assistant",
+          uuid: messageId + "-" + block.type,
+          session_id: this.sessionId,
+          parent_tool_use_id: null,
+          message: { id: messageId, role: "assistant", usage, content: [block] },
+        });
+        frame("msg-u1", { type: "thinking", thinking: "plan" }, { input_tokens: 100, cache_read_input_tokens: 40, output_tokens: 10 });
+        frame("msg-u1", { type: "text", text: "first" }, { input_tokens: 100, cache_read_input_tokens: 40, output_tokens: 10 });
+        frame("msg-u2", { type: "text", text: "second" }, { input_tokens: 160, cache_read_input_tokens: 40, output_tokens: 20 });
+        // 整轮累计（含子 Agent 的消耗）比逐条之和多 100 输入 / 20 输出。
+        this.resultUsage = { input_tokens: 400, cache_read_input_tokens: 40, output_tokens: 50 };
       } else if (text === "env") {
         const managedProvider = this.options.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST;
         this.enqueue({ type: "assistant", uuid: "assistant-env", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: managedProvider }] } });
@@ -112,7 +133,7 @@ class FakeQuery {
         this.enqueue({ type: "stream_event", uuid: "stream-1", session_id: this.sessionId, parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: imageCount ? "image:1" : "hello" } } });
         this.enqueue({ type: "assistant", uuid: "assistant-1", session_id: this.sessionId, parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: imageCount ? "image:1" : "hello" }] } });
       }
-      this.enqueue({ type: "result", subtype: "success", is_error: false, uuid: "result-" + commandUuid, session_id: this.sessionId, usage: {}, total_cost_usd: 0 });
+      this.enqueue({ type: "result", subtype: "success", is_error: false, uuid: "result-" + commandUuid, session_id: this.sessionId, usage: this.resultUsage || {}, total_cost_usd: 0 });
       this.enqueue({ type: "command_lifecycle", command_uuid: commandUuid, state: "completed", uuid: "lifecycle-completed-" + commandUuid, session_id: this.sessionId });
     }
   }
@@ -450,6 +471,38 @@ describe("Claude Agent SDK worker", () => {
       type: "tool_execution_end",
       toolUseId: "task-tool-empty",
       output: expect.not.objectContaining({ content: expect.anything() }),
+    }));
+  });
+
+  it("reports usage per assistant response and only the remainder at prompt_done", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-usage", type: "prompt", message: "usage-progress", permissionMode: "full-access" });
+    const done = await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-usage");
+
+    // 一帧一份 usage：同一条响应的多帧必须去重，否则 token 会被算好几遍。
+    const usages = worker.messages.filter((message) => message.type === "token_usage");
+    expect(usages).toEqual([
+      expect.objectContaining({ inputTokens: 140, outputTokens: 10, cacheInputTokens: 40, contextTokens: 140 }),
+      expect.objectContaining({ inputTokens: 200, outputTokens: 20, cacheInputTokens: 40, contextTokens: 200 }),
+    ]);
+    // 回合结束只补差值（累计 440/50/40 减已上报 340/30/40），不能整份再发一遍。
+    expect(done.usage).toEqual({ input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0 });
+    // 上下文占用取最后一条响应的输入长度，不是整回合之和。
+    expect(done.contextTokens).toBe(200);
+  });
+
+  it("never reports a backgrounded Bash task as a subagent", async () => {
+    const worker = await initialize();
+    worker.send({ id: "prompt-bg-bash", type: "prompt", message: "background-bash", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "prompt-bg-bash");
+
+    // local_bash 的 task_started/task_notification 混进来会凭空多一张「子 Agent」卡片，
+    // 主 Agent 用 TaskStop 收尾时还会显示「已中断」。
+    expect(worker.messages.some((message) => String(message.type).startsWith("subagent_"))).toBe(false);
+    // Bash 自己的工具结果照常转发。
+    expect(worker.messages).toContainEqual(expect.objectContaining({
+      type: "tool_execution_end",
+      toolUseId: "bash-tool-1",
     }));
   });
 

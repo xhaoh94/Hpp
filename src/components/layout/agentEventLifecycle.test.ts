@@ -1396,8 +1396,9 @@ describe("agent event terminal reconciliation", () => {
     }, harness.controller);
 
     const failed = getMessages().find((message) => message.eventId === "compact-failed");
+    // 分隔条现在会带上失败原因（`上下文压缩失败：<detail>`），断言前缀即可。
     expect(failed).toMatchObject({
-      content: "上下文压缩失败",
+      content: expect.stringContaining("上下文压缩失败"),
       compactionState: "failed",
     });
     expect(useChatStore.getState().compactingSessions[SESSION_ID]).toBeUndefined();

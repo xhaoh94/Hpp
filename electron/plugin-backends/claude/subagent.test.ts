@@ -152,6 +152,33 @@ describe("Claude subagent bridge", () => {
     }));
   });
 
+  it("ignores task events for non-agent background work", () => {
+    const events: AgentEvent[] = [];
+    const agent = new ClaudeSDKAgent("session-bash", (event) => events.push(event as AgentEvent));
+    const internals = agent as unknown as ClaudeInternals;
+    internals.turnActive = true;
+
+    // 超过 60s 被挪到后台的 Bash 也会走 task_started/task_notification。
+    // 旧版 worker 漏筛时，这里必须不产生任何子 Agent 卡片。
+    internals.handleWorkerMessage({
+      type: "subagent_started",
+      toolUseId: "tool-bash-1",
+      taskId: "bash-task-1",
+      taskType: "local_bash",
+      description: "确认 present 扩展引用并定位 pi SDK 安装",
+      status: "running",
+    });
+    internals.handleWorkerMessage({
+      type: "subagent_update",
+      toolUseId: "tool-bash-1",
+      taskId: "bash-task-1",
+      taskType: "local_bash",
+      status: "stopped",
+    });
+
+    expect(getSubagentEvents(events)).toEqual([]);
+  });
+
   it("prefers the worker-forwarded title over the Task description", () => {
     const events: AgentEvent[] = [];
     const agent = new ClaudeSDKAgent("session-title", (event) => events.push(event as AgentEvent));

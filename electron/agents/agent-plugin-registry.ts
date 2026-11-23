@@ -2022,9 +2022,9 @@ export class AgentPluginRegistry {
     let independentCompactionActive = false;
     const backgroundSubagentOwnerByKey = new Map<string, string>();
     let refreshIdleFromBackend: (initialDelayMs?: number) => Promise<boolean | undefined> = async () => undefined;
-    const beginLifecycleRevision = () => {
+    const beginLifecycleRevision = (clientMessageId: string | null = null) => {
       activeLifecycleRevision = `${backendId}:${lifecycleInstanceScope}:${++turnSequence}`;
-      activeClientMessageId = null;
+      activeClientMessageId = clientMessageId;
       independentCompactionActive = false;
     };
     const ensureActiveLifecycleRevision = () => {
@@ -2054,6 +2054,19 @@ export class AgentPluginRegistry {
       const normalizedEvent = normalizePluginEvent(event);
       const isBackgroundSubagent = normalizedEvent.type === "subagent_event"
         && normalizedEvent.background === true;
+      if (normalizedEvent.type === "host_turn_started") {
+        // 后台结果自动唤醒：这是宿主发起的新回合，必须换一个新的 lifecycle，
+        // 否则渲染层会把它当成已结束的上一轮而丢弃。给它一个合成 client
+        // message id，后续事件才能在同一轮身份下被接受（而不是回退到已结束
+        // 的上一条用户消息）。
+        const hostClientId = typeof normalizedEvent.clientUserMessageId === "string"
+          && normalizedEvent.clientUserMessageId.trim()
+          ? normalizedEvent.clientUserMessageId.trim()
+          : null;
+        beginLifecycleRevision(hostClientId);
+        activeLifecycleTerminalSeen = false;
+        markBackendBusy();
+      }
       const backgroundSubagentKey = isBackgroundSubagent
         ? String(normalizedEvent.toolCallId || normalizedEvent.id || normalizedEvent.agentThreadId || "").trim()
         : "";

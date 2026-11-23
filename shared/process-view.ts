@@ -55,6 +55,14 @@ export type ProcessEntryView = {
     lastActivityAt?: number;
     /** 运行中的实时输出片段（尾巴），仅用于监视窗。 */
     liveOutput?: string;
+    /** 后台派发的子任务（主回合结束后仍继续运行）。 */
+    background?: boolean;
+    /** 后台任务 id（sa_xxx），监视窗停止与续聊使用。 */
+    taskId?: string;
+    /** 完整结果文件路径（后台任务）。 */
+    resultFile?: string;
+    /** 已完成的对话轮数（含续聊）；后台任务用。 */
+    rounds?: number;
   }>;
 };
 
@@ -105,6 +113,9 @@ export const getEffectiveProcessSubagents = <T extends ProcessSubagentView>(
   ));
   return list.filter((subagent) => {
     if (isPlaceholder(subagent.id)) return false;
+    // 后台子任务在派发它的工具调用返回后仍在运行：条目已 completed 不代表
+    // 这些子任务结束了，监视窗要一直保留到它们自己的终态事件。
+    if (terminalEntry && subagent.background === true) return true;
     return !terminalEntry || !subagent.status || isTerminalProcessSubagentStatus(subagent.status);
   });
 };

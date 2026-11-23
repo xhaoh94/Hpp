@@ -46,6 +46,21 @@ describe("ContextCompactionController", () => {
     expect(compact).toHaveBeenCalledTimes(1);
   });
 
+  it("无 phase 的压缩兜底事件不会提前解除压制", async () => {
+    const { controller, compact } = createHarness();
+    controller.observeEvent(SESSION, startTurn);
+    controller.observeEvent(SESSION, { type: "context_compaction", phase: "started" });
+    // 旧 SDK 的兜底事件：只知道发生了压缩，不带 phase。
+    controller.observeEvent(SESSION, { type: "context_compaction", id: "c1" });
+
+    // 压缩仍在跑（真实终态没来）：后续读数和回合结束不能被当成「已经压完」。
+    controller.observeEvent(SESSION, startTurn);
+    controller.observeEvent(SESSION, usage(850_000));
+    controller.observeEvent(SESSION, endTurn);
+    await flush();
+    expect(compact).not.toHaveBeenCalled();
+  });
+
   it("never compacts on a usage reading alone", async () => {
     // 恢复会话时用量是旧的（比如 85%），但没有任何回合结束：不能压。
     const { controller, compact } = createHarness();
@@ -332,7 +347,8 @@ describe("ContextCompactionController", () => {
     expect(compact).not.toHaveBeenCalled();
   });
 
-  it("drops the pre-compaction reading so a late summary usage cannot re-trigger", async () => {    const { controller, compact } = createHarness({ threshold: 10 });
+  it("drops the pre-compaction reading so a late summary usage cannot re-trigger", async () => {
+    const { controller, compact } = createHarness({ threshold: 10 });
     controller.observeEvent(SESSION, startTurn);
     controller.observeEvent(SESSION, usage(190_000));
     controller.observeEvent(SESSION, endTurn);
@@ -517,5 +533,82 @@ describe("ContextCompactionController", () => {
     controller.observeEvent(SESSION, endTurn);
     await flush();
     expect(compact).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call compact() while another compaction is still running", async () => {
+    // 闩锁在手动压缩开始前就已经点亮：压缩自己的流式事件又会推进回合序号，
+    // 光靠 armedEpoch 挡不住，必须显式看 compactionActive。
+    const { controller, compact, setIdle } = createHarness({ idle: false });
+    controller.observeEvent(SESSION, startTurn);
+    controller.observeEvent(SESSION, usage(850_000));
+    controller.observeEvent(SESSION, endTurn);
+    await flush();
+    expect(compact).not.toHaveBeenCalled();
+
+    controller.observeEvent(SESSION, { type: "context_compaction", phase: "started" });
+    controller.observeEvent(SESSION, { type: "stream_delta", delta: "摘要中" });
+    setIdle(true);
+    controller.observeEvent(SESSION, endTurn);
+    await flush();
+    expect(compact).not.toHaveBeenCalled();
+  });
+
+  it("does not repeat the failure notice when the backend already reported it", async () => {
+    // 四家都是「先发 context_compaction failed，再让命令失败」：
+    // 界面已经有失败分隔条了，主进程不该再补一条。
+    const { controller, errors } = createHarness({
+      compact: async () => {
+        controller.observeEvent(SESSION, { type: "context_compaction", id: "c1", phase: "started" });
+        controller.observeEvent(SESSION, {
+          type: "context_compaction",
+          id: "c1",
+          phase: "failed",
+          detail: "upstream 429",
+        });
+        throw new Error("upstream 429");
+      },
+    });
+    controller.observeEvent(SESSION, startTurn);
+    controller.observeEvent(SESSION, usage(850_000));
+    controller.observeEvent(SESSION, endTurn);
+    await flush();
+    expect(errors).toEqual([]);
+  });
+
+  it("reports the same failure only once across turns", async () => {
+    // 闩锁每回合都会重试：失败原因没变时不要把同一句话刷满对话。
+    const { controller, errors } = createHarness({
+      compact: async () => { throw new Error("SESSION_BUSY"); },
+    });
+    for (let index = 0; index < 3; index += 1) {
+      controller.observeEvent(SESSION, startTurn);
+      controller.observeEvent(SESSION, usage(850_000));
+      controller.observeEvent(SESSION, endTurn);
+      await flush();
+    }
+    expect(errors).toHaveLength(1);
+  });
+
+  it("clears a stuck compaction once the watchdog fires", async () => {
+    // worker 崩在压缩中途：既没有终态事件，compact() 也不会拒绝。
+    // 看门狗必须解除用量压制，否则这个会话的阈值永久失效。
+    vi.useFakeTimers();
+    try {
+      const { controller, compact, errors } = createHarness({ threshold: 10 });
+      controller.observeEvent(SESSION, startTurn);
+      controller.observeEvent(SESSION, endTurn);
+      controller.observeEvent(SESSION, { type: "context_compaction", id: "c1", phase: "started" });
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(errors.join("\n")).toContain("未在预期时间内结束");
+
+      // 下一回合的读数必须还能点亮闩锁。
+      controller.observeEvent(SESSION, startTurn);
+      controller.observeEvent(SESSION, usage(190_000));
+      controller.observeEvent(SESSION, endTurn);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(compact).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

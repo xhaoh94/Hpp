@@ -11,8 +11,8 @@ describe("chat subagent two-level expansion", () => {
     // 胶囊/面板用极简标题；一级展开用多一句摘要，两者刻意不同。
     expect(block).toContain("getSubagentSummaryText(fullPrompt, expandedText)");
     // 胶囊仍用极简标题，和一级摘要刻意不同——两个 import 都要在。
-    expect(block).toContain("{subagent.title || getSubagentTitle(subagent.prompt, subagent.label)}");
-    expect(block).toContain("getSubagentSummaryText, getSubagentTitle");
+    expect(block).toContain("{getSubagentDisplayTitle(subagent)}");
+    expect(block).toContain("getSubagentDisplayTitle, getSubagentSummaryText");
     expect(block).toContain('title={fullPrompt || undefined}');
     expect(block).toContain("chat-subagent-summary-text");
     expect(block).toContain("chat-subagent-flow");

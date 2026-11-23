@@ -58,6 +58,9 @@ let accumulatedResultCostUsd = 0;
 let pendingPermissions = new Map();
 let toolUses = new Map();
 let subagentToolUseIds = new Set();
+// 已经被判定「不是子 Agent」的后台任务（Bash / MCP / 工作流）。它们的 task_* 事件
+// 之后还会来（尤其 TaskStop 之后的 task_notification），不记住就会漏进子 Agent 通道。
+let nonAgentTaskIds = new Set();
 let completedSubagentNotifications = new Map();
 let streamBlockTypes = new Map();
 let streamBlockToolIds = new Map();
@@ -531,6 +534,50 @@ const handleStreamEvent = (message) => {
   }
 };
 
+// 本回合已经上报给界面的用量。回合结束只能补差值，否则同一批 token 会被算两遍。
+let reportedAssistantUsage = { input: 0, output: 0, cacheInput: 0 };
+// 一条 API 响应会被拆成多帧（thinking / text / tool_use 各一帧），每帧都带同一份
+// usage，所以按 message.id 去重 —— 按帧 uuid 去重等于没去重。
+let reportedAssistantMessageIds = new Set();
+// 最近一条响应的输入长度：它就是当时的上下文占用，比"整回合输入之和"靠谱得多。
+let lastAssistantInputTokens = 0;
+
+const getAssistantUsage = (message) => {
+  const usage = asRecord(asRecord(message?.message).usage);
+  const input = (Number(usage.input_tokens) || 0)
+    + (Number(usage.cache_read_input_tokens) || 0)
+    + (Number(usage.cache_creation_input_tokens) || 0);
+  return {
+    input,
+    output: Number(usage.output_tokens) || 0,
+    cacheInput: Number(usage.cache_read_input_tokens) || 0,
+  };
+};
+
+const reportAssistantUsage = (message) => {
+  // 只在回合进行中记账：启动/resume 时重放的历史帧不能算进本回合。
+  if (!activePromptId) return;
+  const messageId = stringValue(asRecord(message?.message).id) || stringValue(message?.uuid);
+  if (messageId && reportedAssistantMessageIds.has(messageId)) return;
+  const { input, output, cacheInput } = getAssistantUsage(message);
+  if (messageId) reportedAssistantMessageIds.add(messageId);
+  if (input <= 0 && output <= 0) return;
+  reportedAssistantUsage.input += input;
+  reportedAssistantUsage.output += output;
+  reportedAssistantUsage.cacheInput += cacheInput;
+  if (input > 0) lastAssistantInputTokens = input;
+  // 逐条上报，底部统计不用等 prompt_done 才从"暂无"跳出来。
+  // contextTokens 取本次请求的输入长度：它就是当下的上下文占用。
+  send({
+    type: "token_usage",
+    inputTokens: input,
+    outputTokens: output,
+    cacheInputTokens: cacheInput,
+    contextTokens: input,
+    contextPrecision: "estimated",
+  });
+};
+
 const handleAssistant = (message) => {
   const content = asRecord(message.message).content;
   const parentToolUseId = stringValue(message.parent_tool_use_id);
@@ -556,6 +603,7 @@ const handleAssistant = (message) => {
     }
   }
   if (isSubagentChild) return;
+  reportAssistantUsage(message);
   send({
     type: "message_end",
     text: extractText(message.message),
@@ -678,6 +726,9 @@ const resetCommandTracking = () => {
   deferredSDKResult = null;
   accumulatedResultUsage = {};
   accumulatedResultCostUsd = 0;
+  reportedAssistantUsage = { input: 0, output: 0, cacheInput: 0 };
+  reportedAssistantMessageIds = new Set();
+  lastAssistantInputTokens = 0;
 };
 
 const recordResultUsage = (message) => {
@@ -754,11 +805,24 @@ const finishSDKPromptFromResult = () => {
     })();
   } else {
     finishManualCompaction("completed");
+    // 逐条 usage 已经报过绝大部分，这里只补差值（子 Agent 的消耗、没带 usage 的帧）。
+    // 全量再发一次会让同一批 token 在统计里翻倍。
+    const totalInput = (Number(accumulatedResultUsage.input_tokens) || 0)
+      + (Number(accumulatedResultUsage.cache_read_input_tokens) || 0)
+      + (Number(accumulatedResultUsage.cache_creation_input_tokens) || 0);
+    const totalOutput = Number(accumulatedResultUsage.output_tokens) || 0;
+    const totalCacheInput = Number(accumulatedResultUsage.cache_read_input_tokens) || 0;
     send({
       type: "prompt_done",
       id: promptId,
-      usage: accumulatedResultUsage,
+      usage: {
+        input_tokens: Math.max(0, totalInput - reportedAssistantUsage.input),
+        output_tokens: Math.max(0, totalOutput - reportedAssistantUsage.output),
+        cache_read_input_tokens: Math.max(0, totalCacheInput - reportedAssistantUsage.cacheInput),
+      },
       totalCostUsd: accumulatedResultCostUsd,
+      // 上下文占用用最后一条响应的输入长度，别拿整回合输入之和冒充（那会显示成 100%）。
+      ...(lastAssistantInputTokens > 0 ? { contextTokens: lastAssistantInputTokens } : {}),
     });
     void emitPreciseContextUsage();
   }
@@ -794,6 +858,36 @@ const handleCommandLifecycle = (message) => {
     if (activeSDKCommandId === commandId) activeSDKCommandId = null;
     if (guidanceCommands.size === 0) finishSDKPromptFromResult();
   }
+};
+
+// Claude 的 task_* 事件覆盖所有后台任务：Bash 命令、MCP 任务、工作流、子 Agent 都在里面。
+// 只有 local_agent 才是子 Agent。一条超过 60s 被挪到后台的 Bash 也会照常走
+// task_started/task_notification；要是把它当子 Agent，界面会凭空多一张卡片
+// （标题还是 Claude 给命令起的那句描述），主 Agent 用 TaskStop 收尾时还会显示「已中断」。
+const NON_AGENT_TASK_TYPES = new Set(["local_bash", "local_shell", "mcp_task", "local_workflow"]);
+
+const isSubagentTaskMessage = (message) => {
+  const taskType = String(message?.task_type || message?.taskType || "").trim().toLowerCase();
+  const taskId = String(message?.task_id || message?.taskId || "");
+  if (taskId && nonAgentTaskIds.has(taskId)) return false;
+  const markNonAgent = () => {
+    if (!taskId) return false;
+    // 上限纯属防泄漏：一条超长会话也不会攒出十万个 id。
+    if (nonAgentTaskIds.size > 2000) nonAgentTaskIds.clear();
+    nonAgentTaskIds.add(taskId);
+    return false;
+  };
+  if (taskType === "local_agent") return true;
+  if (NON_AGENT_TASK_TYPES.has(taskType)) return markNonAgent();
+  if (message?.subagent_type || message?.subagentType) return true;
+  const toolUseId = String(message?.tool_use_id || message?.toolUseId || "");
+  if (toolUseId) {
+    if (subagentToolUseIds.has(toolUseId)) return true;
+    const tool = toolUses.get(toolUseId);
+    if (tool && tool.isSubagent !== true) return markNonAgent();
+  }
+  // 认不出来（老版本 SDK 不带 task_type）：宁可放过，也别把真的子 Agent 挡在外面。
+  return true;
 };
 
 const getSubagentPromptScope = (message) => {
@@ -878,8 +972,10 @@ const handleSDKMessage = async (message, generation = queryGeneration) => {
   else if (message.type === "user") await handleUserToolResults(message, generation);
   else if (message.type === "command_lifecycle") handleCommandLifecycle(message);
   else if (message.type === "system" && ["task_started", "task_notification", "task_progress", "task_completed"].includes(message.subtype)) {
+    // 先判 scope（它会登记 background / retired 状态），再按任务类型筛掉非子 Agent 的后台任务。
     const scope = getSubagentPromptScope(message);
     if (!scope) return;
+    if (!isSubagentTaskMessage(message)) return;
     const status = message.status || message.state || (message.subtype === "task_started" ? "running" : undefined);
     const terminal = ["completed", "complete", "done", "success", "succeeded"].includes(String(status || "").toLowerCase());
     send({
