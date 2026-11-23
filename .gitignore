@@ -1,19 +1,61 @@
+# ---------- 依赖与构建产物 ----------
 node_modules
+out
+dist
 release
 linux-release
-dist
-out
-# 本地验证产物（预览 HTML / 截图 / 临时脚本 / 打包中间目录），不入库
-/tmp/
-mobile/android/.idea
+
 # electron-vite 每次 dev 启动时用 esbuild 打包配置生成的临时缓存（正常退出自删，
 # 强杀进程会遗留，已人工清理过多次）
 electron.vite.config.*.mjs
-.trae
-.workbuddy
-.trae
 
 # 由 npm run editors:build 生成的 VSCode 扩展包，只在打包时用
 /resources/editors/*.vsix
-docs
+
+# Capacitor sync / Gradle 每次都会重新生成的内容（不入库，构建时重新产出）
+mobile/android/.cxx/
+mobile/android/app/.cxx/
+mobile/android/capacitor-cordova-android-plugins/
+mobile/android/app/src/main/assets/public/
+
+# ---------- 本地目录与临时文件 ----------
+# 本地验证产物（预览 HTML / 截图 / 临时脚本 / 打包中间目录），不入库。
+# /.tmp/ 之前只靠开发机全局 gitignore 的 *.tmp 兜着，换机器就会整目录冒出来。
+/tmp/
+/.tmp/
+.workbuddy
+.trae
+
+# 打包出来的安装包与离线安装器（体积大，走 Release 分发）
 offline-installers
+
+# 内部设计与开发文档，不进公开仓库
+docs
+
+# ---------- 日志与缓存 ----------
+*.log
+npm-debug.log*
+yarn-error.log*
+.cache/
+.eslintcache
+*.tsbuildinfo
+coverage/
+test-results/
+playwright-report/
+
+# ---------- 编辑器与系统 ----------
+.idea/
+mobile/android/.idea
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 凭据与签名（绝不入库） ----------
+.env
+.env.local
+.env.*.local
+!.env.example
+*.keystore
+*.jks
+mobile/android/key.properties
