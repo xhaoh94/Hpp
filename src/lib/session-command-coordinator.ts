@@ -13,10 +13,12 @@ import {
 } from "@/lib/session-references";
 import {
   ensureSessionMessagesLoaded,
+  getSessionContextUsage,
   getSessionModel,
   getSessionModelThinking,
   getSessionThinking,
   getSessionThinkingOrDefault,
+  saveSessionContextUsage,
   saveSessionModel,
   saveSessionModelThinking,
   saveSessionThinking,
@@ -33,6 +35,7 @@ import {
   type ModelInfo,
   type QueuedMessage,
   type QueuedMessageEditableDraft,
+  type SessionContextUsage,
 } from "@/stores/chat-store";
 import { useProjectStore, type Project, type ProjectSession } from "@/stores/project-store";
 import type { AgentForkResult, AgentImagePayload, AgentReloadConfigResult } from "@/types";
@@ -1066,6 +1069,13 @@ export async function sendMessage(input: {
           ...(message.action ? { action: message.action } : {}),
         },
       );
+      // 最后一次空闲检查与 IPC 入场之间也可能刚好开始压缩。后端明确没接收
+      // 这条输入才允许回退，不对超时或不确定是否送达的错误自动重发。
+      if (!result.success && result.error === "CODEX_COMPACTING" && sessionIsOpen(input.sessionId)) {
+        input.hooks?.onSendFailureCleanup?.(input.sessionId);
+        useChatStore.getState().discardUnsentUserMessage(input.sessionId, input.clientMessageId);
+        return enqueue();
+      }
       if (!result.success) throw new Error(result.error || "SEND_FAILED");
       if (!sessionIsOpen(input.sessionId)) {
         input.hooks?.onSendFailureCleanup?.(input.sessionId);
@@ -1123,12 +1133,43 @@ async function setModelInternal(
     candidate.provider === selected.provider && candidate.id === selected.id
   ) || selected;
   saveSessionModel(sessionId, effectiveModel);
-  // 上下文用量属于具体模型；切模型后旧模型的占用比例不能套到新窗口上。
-  useChatStore.getState().clearSessionContextUsage(sessionId);
+  // 上下文读数属于会话，不随选中的模型走：换模型只是换窗口，读数仍然有效，
+  // 按新窗口重算比例即可。以前这里直接清空，结果「切过去再切回来」（中间没有
+  // 产生任何请求）之后界面变成空数据，看起来像上下文被清掉了。
+  syncContextUsageToModel(sessionId, effectiveModel);
   applyActiveModels(sessionId, availableModels, effectiveModel);
   await reconcileThinkingForModel(sessionId, session.agentId, effectiveModel);
   appendModelChangeDivider(sessionId, previous, effectiveModel);
   return { model: effectiveModel, models: availableModels, previous };
+}
+
+/**
+ * 把已有的上下文读数搬到新模型的窗口上。
+ *
+ * `usedTokens` 是「上一次请求实际带上的上下文长度」，属于会话而不是某个模型，
+ * 换模型后仍然成立；要换的只有窗口和由它算出的比例。读数为空时只更新窗口，
+ * 让用户至少能看到新模型的总量。
+ */
+function syncContextUsageToModel(sessionId: string, model: ModelInfo) {
+  const chat = useChatStore.getState();
+  const usage = chat.contextUsageBySession[sessionId] ?? getSessionContextUsage(sessionId);
+  if (!usage) return;
+  const contextWindow = model.contextWindow ?? usage.contextWindow;
+  const usedTokens = usage.usedTokens;
+  const nextUsage: SessionContextUsage = {
+    ...usage,
+    contextWindow,
+    remainingTokens: contextWindow && usedTokens !== undefined
+      ? Math.max(0, contextWindow - usedTokens)
+      : undefined,
+    usageRatio: contextWindow && usedTokens !== undefined
+      ? Math.min(1, usedTokens / contextWindow)
+      : undefined,
+    // 读数保留，只是从现在起按当前模型的窗口解释。
+    model: { provider: model.provider, id: model.id },
+  };
+  chat.setSessionContextUsage(sessionId, nextUsage);
+  saveSessionContextUsage(sessionId, nextUsage);
 }
 
 /** 模型切换成功后在聊天流插入 divider；新模型与上一回合实际运行模型不同时附加性能提示。 */
@@ -1444,6 +1485,14 @@ export async function guideQueuedMessage(sessionId: string, queueItemId: string)
         sessionId,
         { planModeEnabled: !!item.planModeEnabled, permissionMode: item.permissionMode },
       );
+      // 原生 Compact 明确拒收，不能记成已送达或发送失败。保留原队列项，
+      // 等普通发送路径在会话空闲后消费；取消/关闭过的项不要重新创建。
+      if (!result.success && result.error === "CODEX_COMPACTING") {
+        if (dropPendingGuidance(sessionId, pending) && sessionIsOpen(sessionId)) {
+          useChatStore.getState().clearQueuedMessageError(sessionId, queueItemId);
+        }
+        return { success: true, queued: true, queueItemId };
+      }
       if (!result.success) throw new Error(result.error || "GUIDANCE_FAILED");
       if (result.guidanceId) pending.guidanceId = result.guidanceId;
       // The turn may have been interrupted while the guidance request was in

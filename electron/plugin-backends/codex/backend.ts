@@ -117,6 +117,7 @@ export class CodexAgent {
   private requestId = 0;
   private models: AgentModel[] = [];
   private isAborting = false;
+  private compactCommandId: string | null = null;
   private activePromptIds = new Set<string>();
   private initPromise: Promise<void> | null = null;
   private initKey: string | null = null;
@@ -265,6 +266,7 @@ export class CodexAgent {
 
   async sendMessage(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
+    if (this.compactCommandId) throw new Error("CODEX_COMPACTING");
     this.isAborting = false;
     this.guidancePendingId = null;
     const promptId = options?.clientMessageId || this.createCommandId();
@@ -296,11 +298,12 @@ export class CodexAgent {
     // pendingResponses also contains short-lived model/action/config RPCs.
     // Those requests are not an active conversation turn and must not keep
     // agent:getSessionState reporting busy after the prompt has completed.
-    return !this.isAborting && this.activePromptIds.size === 0;
+    return !this.isAborting && !this.compactCommandId && this.activePromptIds.size === 0;
   }
 
   async sendGuidance(message: string, images?: AgentImagePayload, options?: AgentSendOptions): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
+    if (this.compactCommandId) throw new Error("CODEX_COMPACTING");
     const guidanceId = this.createCommandId();
 
     await new Promise<void>((resolve, reject) => {
@@ -321,7 +324,9 @@ export class CodexAgent {
           this.guidancePendingId = guidanceId;
           resolve();
         } else {
-          reject(new Error(optionalString(data.error) || "Codex guidance failed"));
+          const detail = optionalString(data.error) || "Codex guidance failed";
+          reject(new Error(/ActiveTurnNotSteerable\s*\{\s*turn_kind:\s*Compact\s*\}/.test(detail)
+            ? "CODEX_COMPACTING" : detail));
         }
       });
     });
@@ -362,9 +367,11 @@ export class CodexAgent {
     this.guidancePendingId = null;
     this.eventBuffer.clear();
     for (const [id, handler] of this.pendingResponses.entries()) {
+      // 压缩只有收到原生回合终态后才真正释放，interrupt 的应答不是终态。
+      if (id === this.compactCommandId) continue;
+      this.pendingResponses.delete(id);
       handler({ type: "error", id, error: "Codex request interrupted" });
     }
-    this.pendingResponses.clear();
     this.activePromptIds.clear();
     if (!this.process) {
       this.emitEvent({ type: "aborted" });
@@ -443,9 +450,13 @@ export class CodexAgent {
   async compact(): Promise<void> {
     if (!this.process) throw new Error("Codex worker is not running");
     if (!this.isIdle()) throw new Error("SESSION_BUSY");
-    const data = await this.requestWorkerCommand({ type: "compact" }, 180_000);
-    if (data.type !== "compacted") {
-      throw new Error(optionalString(data.error) || "Codex compact failed");
+    const id = this.createCommandId();
+    this.compactCommandId = id;
+    try {
+      const data = await this.requestWorkerCommand({ id, type: "compact" }, 180_000);
+      if (data.type !== "compacted") throw new Error(optionalString(data.error) || "Codex compact failed");
+    } finally {
+      if (this.compactCommandId === id) this.compactCommandId = null;
     }
   }
 

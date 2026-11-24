@@ -342,9 +342,12 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
       });
   };
 
+  // 恢复后保持历史会话弹窗打开：一次挑回好几个是常态，关掉就得重新点开。
+  // 恢复的会话会立刻从 closedSessions 里移出，列表本身已经给出反馈。
   const handleResumeSession = (session: ProjectSession) => {
-    void SessionCommandCoordinator.reopenSession(session.id, { activate: true })
-      .finally(() => setShowHistory(false));
+    void SessionCommandCoordinator.reopenSession(session.id, { activate: true }).catch((error: unknown) => {
+      console.error("[agent] session resume failed:", getErrorMessage(error));
+    });
   };
 
   const handleDeleteHistorySessions = async (sessionIds: string[]) => {

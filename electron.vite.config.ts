@@ -19,12 +19,16 @@ const copyAgentWorkerPlugin = () => ({
       ["electron/plugin-backends/pi/transient-provider-retry.mjs", "transient-provider-retry.mjs"],
       ["electron/plugin-backends/pi/pi-fork-utils.mjs", "pi-fork-utils.mjs"],
       ["electron/plugin-backends/pi/pi-agent-dir.mjs", "pi-agent-dir.mjs"],
+      ["electron/plugin-backends/pi/model-context-window.mjs", "model-context-window.mjs"],
       ["electron/plugin-backends/pi/shell-environment.mjs", "shell-environment.mjs"],
+      ["electron/plugin-backends/pi/shell-sessions.mjs", "shell-sessions.mjs"],
+      ["electron/plugin-backends/pi/shell-pty-host.mjs", "shell-pty-host.mjs"],
       ["electron/plugin-backends/pi/plan-mode-policy.mjs", "plan-mode-policy.mjs"],
       ["electron/plugin-backends/pi/subagent-extension.mjs", "subagent-extension.mjs"],
       ["electron/plugin-backends/pi/present-extension.mjs", "present-extension.mjs"],
       ["electron/plugin-backends/pi/todo-extension.mjs", "todo-extension.mjs"],
       ["electron/plugin-backends/pi/subagent-worktree.mjs", "subagent-worktree.mjs"],
+      ["electron/plugin-backends/pi/subagent-storage.mjs", "subagent-storage.mjs"],
       ["electron/plugin-backends/pi/subagent-bridge-extension.mjs", "subagent-bridge-extension.mjs"],
       ["electron/plugin-backends/pi/subagent-policy.mjs", "subagent-policy.mjs"],
       ["electron/plugin-backends/claude/worker.mjs", "claude-sdk-worker.mjs"],
@@ -43,6 +47,12 @@ const copyAgentWorkerPlugin = () => ({
       }
       copyFileSync(sourcePath, targetPath);
     }
+    // 模型上下文窗口目录：主进程与 pi worker 都按 out/main 同目录找这份内置快照，
+    // 打包（files: out/**/*）后天然跟着走，不需要额外 extraResources。
+    const catalogSource = resolve(__dirname, "resources/model-context-catalog.json");
+    const catalogTarget = resolve(targetDir, "model-context-catalog.json");
+    if (existsSync(catalogSource)) copyFileSync(catalogSource, catalogTarget);
+    else console.warn("[copy-agent-workers] 缺少 resources/model-context-catalog.json，运行时只能靠在线刷新");
     const subagentPromptSourceDir = resolve(__dirname, "electron/plugin-backends/pi/subagent-prompts");
     const subagentPromptTargetDir = resolve(targetDir, "subagent-prompts");
     mkdirSync(subagentPromptTargetDir, { recursive: true });

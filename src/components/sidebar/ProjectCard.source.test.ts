@@ -79,6 +79,18 @@ describe("ProjectCard lifecycle regression constraints", () => {
     expect(historyDeletion).toContain("if (targets.length === 0) return;");
   });
 
+  // 恢复会话后弹窗要留在原地：用户经常一次挑回好几个，关掉就得重新点开找。
+  it("keeps the history modal open after restoring a session", () => {
+    const resumeHandler = projectCardSource.slice(
+      projectCardSource.indexOf("const handleResumeSession"),
+      projectCardSource.indexOf("const handleDeleteHistorySessions"),
+    );
+
+    expect(resumeHandler).toContain("reopenSession(session.id, { activate: true })");
+    expect(resumeHandler).not.toContain("setShowHistory(false)");
+    expect(resumeHandler).not.toContain(".finally(() =>");
+  });
+
   it("remembers each card's expanded state across restarts", () => {
     // 启动默认只对“从未手动切换过”的项目生效：默认展开当前会话所在的项目。
     expect(projectViewSource).toContain("projectDataHydrated && startupCollapseStateRef.current === null");

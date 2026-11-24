@@ -61,8 +61,8 @@ const getDefaultThinkingLevel = () => {
 
 let projectPath = "";
 let threadId = null;
-// 手动压缩在等 thread/compacted；thread/compact/start 的应答只代表请求已受理。
-let manualCompactionSettle = null;
+// 独立压缩也占用原生回合，不能把它当作可接收输入的普通 turn。
+let manualCompaction = null;
 let appServer = null;
 // stdout/stdin 断管不等于 app-server 已退出；保留最近 child 供 disposeSession 回收。
 let appServerForCleanup = null;
@@ -484,6 +484,7 @@ const startAppServer = async () => {
 };
 
 const failPendingRpc = (error) => {
+  manualCompaction?.fail(error);
   for (const pending of pendingRpc.values()) {
     clearTimeout(pending.timeout);
     pending.reject(error);
@@ -2011,6 +2012,22 @@ const formatCodexNotice = (params) => {
 };
 
 const handleServerNotification = (method, params) => {
+  const compact = manualCompaction;
+  if (compact && ["turn/started", "turn/completed", "thread/compacted"].includes(method)) {
+    const turnId = getTurnId(params);
+    if (!compact.threadId || params.threadId !== compact.threadId || (compact.turnId && turnId !== compact.turnId)) return;
+    if (method === "turn/started") {
+      compact.turnId = turnId;
+      if (compact.cancelled) void interruptTurn(turnId);
+    } else if (method === "turn/completed" && compact.turnId) {
+      if (isCodexTurnFailure(params.turn?.status)) compact.fail(new Error(stringifyValue(params.turn.error) || "Codex 压缩回合未完成"));
+      else compact.finish();
+    } else if (method === "thread/compacted" && !compact.turnId) {
+      // 兼容不发独立 turn/started 的旧协议；新版必须等上面的同一 turn 退出。
+      compact.finish();
+    }
+    return;
+  }
   switch (method) {
     case "thread/started":
       if (forkRequestActive) break;
@@ -2185,9 +2202,6 @@ const handleServerNotification = (method, params) => {
         contextCompactionEmitted = true;
         send({ type: "context_compaction", id: compactionId });
       }
-      const settle = manualCompactionSettle;
-      manualCompactionSettle = null;
-      settle?.();
       break;
     }
     case "warning":
@@ -2269,6 +2283,7 @@ const finishPrompt = () => {
 };
 
 const runPrompt = async (command) => {
+  if (manualCompaction) throw new Error("CODEX_COMPACTING");
   if (promptRunning) throw new Error("Codex is already running");
 
   promptRunning = true;
@@ -2349,6 +2364,7 @@ const waitForActiveTurn = async (timeoutMs = 10000) => {
 };
 
 const runGuidance = async (command) => {
+  if (manualCompaction) throw new Error("CODEX_COMPACTING");
   if (!promptRunning || abortRequested) {
     throw new Error("Codex has no active turn to guide");
   }
@@ -2402,6 +2418,12 @@ const runGuidance = async (command) => {
 };
 
 const abortPrompt = async (command) => {
+  if (manualCompaction) {
+    manualCompaction.cancelled = true;
+    if (manualCompaction.turnId) void interruptTurn(manualCompaction.turnId);
+    send({ type: "aborted", id: command.id });
+    return;
+  }
   if (abortRequested) {
     send({ type: "aborted", id: command.id, promptId: abortedPromptId });
     return;
@@ -2526,43 +2548,33 @@ const handleCommand = async (command) => {
         send({ type: "model_changed", id: command.id, model: { id: command.modelId, provider: command.provider } });
         break;
       case "compact": {
-        if (promptRunning) throw new Error("SESSION_BUSY");
-        await startAppServer();
-        const compactThreadId = await ensureThread();
+        if (promptRunning || manualCompaction) throw new Error("SESSION_BUSY");
         const compactionId = `codex-compact-${command.id}`;
-        send({ type: "context_compaction", id: compactionId, phase: "started" });
-        const settled = new Promise((resolve) => { manualCompactionSettle = resolve; });
-        try {
-          // 新版 app-server 用 thread/compact/start；旧版没有该路由时
-          // 会回 -32601，直接如实报错而不是默默什么都没做。
-          await rpcRequest("thread/compact/start", { threadId: compactThreadId }, 180_000);
-        } catch (error) {
-          manualCompactionSettle = null;
-          send({
-            type: "context_compaction",
-            id: compactionId,
-            phase: "failed",
-            detail: error?.message || String(error),
-          });
-          throw error;
-        }
-        // 等真实的 thread/compacted；超时必须如实报失败，不能伪造完成。
-        // 165s 比宿主的 compact 命令超时（180s）更早，保证失败原因来自这里而不是宿主的通用超时。
         const settleTimeoutMs = 165_000;
-        let settleTimer = null;
-        const settledInTime = await Promise.race([
-          settled.then(() => true),
-          new Promise((resolve) => { settleTimer = setTimeout(() => resolve(false), settleTimeoutMs); }),
-        ]);
-        if (settleTimer) clearTimeout(settleTimer);
-        if (!settledInTime) {
-          manualCompactionSettle = null;
-          const detail = `压缩超时：Codex 未在 ${Math.round(settleTimeoutMs / 1000)} 秒内返回 thread/compacted`;
+        const compact = { threadId: null, turnId: null, cancelled: false };
+        const terminal = new Promise((resolve, reject) => Object.assign(compact, { finish: resolve, fail: reject }));
+        manualCompaction = compact;
+        send({ type: "context_compaction", id: compactionId, phase: "started", postTurn: true });
+        const timer = setTimeout(() => compact.fail(new Error("压缩超时：Codex 未按时返回压缩终态")), settleTimeoutMs);
+        try {
+          const start = async () => {
+            const target = await ensureThread();
+            if (manualCompaction !== compact || compact.cancelled) throw new Error("压缩已中断");
+            compact.threadId = target;
+            await rpcRequest("thread/compact/start", { threadId: target }, settleTimeoutMs);
+          };
+          await Promise.all([start(), terminal]);
+          if (compact.cancelled) throw new Error("压缩已中断");
+          send({ type: "context_compaction", id: compactionId, phase: "completed" });
+          send({ type: "compacted", id: command.id });
+        } catch (error) {
+          const detail = error?.message || String(error);
           send({ type: "context_compaction", id: compactionId, phase: "failed", detail });
-          throw new Error(detail);
+          throw error;
+        } finally {
+          clearTimeout(timer);
+          manualCompaction = null;
         }
-        send({ type: "context_compaction", id: compactionId, phase: "completed" });
-        send({ type: "compacted", id: command.id });
         break;
       }
       case "setThinkingLevel":

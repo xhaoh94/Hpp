@@ -1043,3 +1043,39 @@ describe("assistant token usage", () => {
     });
   });
 });
+
+describe("turn terminal state", () => {
+  it("records the turn outcome instead of leaving it to entry states", () => {
+    const messages: ChatMessage[] = [{
+      id: "turn-state-1",
+      role: "assistant",
+      content: "审查完成",
+      timestamp: 10,
+      process: {
+        startedAt: 10,
+        entries: [{
+          id: "sub-1",
+          type: "subagent",
+          title: "审查代码",
+          timestamp: 11,
+          state: "interrupted",
+          subagents: [{ id: "s1", label: "审查代码", status: "interrupted" }],
+        }],
+      },
+    }];
+    useChatStore.setState({
+      activeSessionId: "turn-state",
+      messages,
+      sessionMessages: { "turn-state": messages },
+    });
+
+    // 子 Agent 被中断，但主回合是正常收尾的：回合终态记 completed。
+    useChatStore.getState().finishAllAssistantProcesses(50, "completed", "turn-state");
+    expect(useChatStore.getState().messages[0].process?.turnState).toBe("completed");
+
+    // 整轮被中止时记 interrupted。
+    useChatStore.setState({ messages, sessionMessages: { "turn-state": messages } });
+    useChatStore.getState().finishAllAssistantProcesses(50, "interrupted", "turn-state");
+    expect(useChatStore.getState().messages[0].process?.turnState).toBe("interrupted");
+  });
+});

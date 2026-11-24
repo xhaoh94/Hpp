@@ -1292,3 +1292,57 @@ describe("standard level operation summary details", () => {
     expect(markup).not.toContain("已修改 src/changed.ts");
   });
 });
+
+describe("outer fold terminal state", () => {
+  const build = (turnState?: AgentProcess["turnState"]): AgentProcess => ({
+    startedAt: 1,
+    endedAt: 121_000,
+    ...(turnState ? { turnState } : {}),
+    entries: [
+      {
+        id: "sub-1",
+        type: "subagent",
+        title: "已中断",
+        state: "interrupted",
+        timestamp: 10,
+        subagents: [{ id: "s1", label: "审查代码", status: "interrupted" }],
+      },
+      {
+        id: "think-1",
+        type: "thinking",
+        title: "思考",
+        detail: "继续分析",
+        state: "completed",
+        timestamp: 20,
+      },
+    ],
+  });
+
+  const render = (process: AgentProcess) => renderToStaticMarkup(createElement(ProcessBlock, {
+    messageId: "assistant-turn-state",
+    process,
+    commentary: [],
+    running: false,
+    onToggle: vi.fn(),
+    onToggleEntry: vi.fn(),
+    onOpenFile: vi.fn(),
+    onPreserveScroll: (action: () => void) => action(),
+  }));
+
+  it("stays completed when only a subagent was interrupted", () => {
+    const markup = render(build("completed"));
+    // 子 Agent 自己带 interrupted 条目，但这一回合是正常收尾的：
+    // 折叠头不能跟着变成「已中断」。
+    expect(markup).toContain("处理耗时");
+    expect(markup).not.toContain(">已中断");
+  });
+
+  it("still reports interrupted when the turn itself was aborted", () => {
+    expect(render(build("interrupted"))).toContain("已中断");
+  });
+
+  it("falls back to entry states for history without a turn state", () => {
+    // 老数据没有 turnState：保持原有行为，免得历史记录全部变成「处理耗时」。
+    expect(render(build(undefined))).toContain("已中断");
+  });
+});

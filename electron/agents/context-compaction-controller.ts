@@ -334,7 +334,10 @@ export class ContextCompactionController {
     const hasWindow = Number.isFinite(contextWindow) && contextWindow > 0;
 
     const state = this.getState(sessionId);
-    if (hasWindow) state.contextWindow = contextWindow;
+    // 分母以模型目录（Hpp 统一目录）为准，后端上报值只在没有目录值时兜底：
+    // 各后端的口径不同（codex 扣预留、claude 用有效上限），跟着事件走会让
+    // 同一个模型在不同插件里得出不同的占用比例，阈值也就跟着飘。
+    if (!state.contextWindow && hasWindow) state.contextWindow = contextWindow;
 
     // 压缩后用量可能被清成 0：这就是「回落到阈值以下」，必须解除闩锁，
     // 否则之后涨回来永远不会再触发。

@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -891,6 +892,91 @@ describe("Pi built-in subagent extension", () => {
   });
 
   /**
+   * 结论已经写完，随后才被 abort（用户按停止、主回合被中断、收尾杀进程）：
+   * 这是「收尾被打断」，不是「活没干完」。以前一律标成「已中断」，
+   * 用户会对着完整结论看到红色中断标记。
+   */
+  it("treats an abort that lands after the final answer as completed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-abort-after-answer-"));
+    let controller: AbortController | undefined;
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'结论：可以直接删'}], stopReason:'stop', model:'test/child'}})+'\\n');",
+        // 留出窗口让测试在「回答已写完、进程还没退」之间打 abort。
+        "setTimeout(() => process.exit(0), 600);",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      controller = new AbortController();
+      const signal = controller.signal;
+      const result = await tools[0].execute(
+        "call-abort-after-answer",
+        { agent: "reviewer", task: "给个结论" },
+        signal,
+        (update: { details: { results: Array<{ output?: string }> } }) => {
+          if (update.details.results[0]?.output === "结论：可以直接删") controller?.abort();
+        },
+        { cwd: root, hasUI: false },
+      );
+
+      const text = String(result.content[0].text);
+      expect(signal.aborted).toBe(true);
+      expect(text).toContain("结论：可以直接删");
+      expect(text).not.toContain("已中断");
+      expect(result.isError).toBeFalsy();
+    } finally {
+      controller?.abort();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still reports an abort that lands before any answer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-abort-midway-"));
+    let controller: AbortController | undefined;
+    try {
+      const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+      await mkdir(cliDir, { recursive: true });
+      await writeFile(join(cliDir, "cli.js"), [
+        // 只在「活动」上报，不产出任何 assistant 正文：这是一次真正的中途打断。
+        "process.stdout.write(JSON.stringify({type:'tool_execution_start', toolName:'read_file', toolCallId:'t1', args:{path:'a.ts'}})+'\\n');",
+        "setTimeout(() => process.exit(0), 3000);",
+      ].join("\n"), "utf8");
+      const agentDir = join(root, "agent");
+      await mkdir(agentDir, { recursive: true });
+      const factory = createHppSubagentExtension({ packageRoot: root, agentDir });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+
+      controller = new AbortController();
+      const signal = controller.signal;
+      let aborted = false;
+      const result = await tools[0].execute(
+        "call-abort-midway",
+        { agent: "reviewer", task: "读一遍" },
+        signal,
+        () => {
+          if (aborted) return;
+          aborted = true;
+          setTimeout(() => controller?.abort(), 60);
+        },
+        { cwd: root, hasUI: false },
+      );
+
+      expect(String(result.content[0].text)).toContain("已中断");
+      expect(result.isError).toBeTruthy();
+    } finally {
+      controller?.abort();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * 上游 overloaded / 限流是**可恢复**的：pi 自己在子进程内只重试 3 次、固定 2s 起，
    * 且并行的几个子进程会同步重试、继续捶上游。所以 Hpp 这层要退到外层重跑并加抖动。
    */
@@ -1467,6 +1553,42 @@ describe("Pi 后台子 Agent", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 25_000);
+
+  it("已开始回答引导时停止，保留本轮部分正文并标为中断", async () => {
+    const { root, tools, factory } = await createHarness(`
+      import { createInterface } from "node:readline";
+      const emit = (event) => console.log(JSON.stringify(event));
+      const delta = (text) => emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+      createInterface({ input: process.stdin }).on("line", (line) => {
+        const command = JSON.parse(line);
+        if (command.type === "prompt") delta("第一轮输出中");
+        if (command.type === "steer") {
+          emit({ type: "response", command: "steer", id: command.id, success: true });
+          emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: "旧答案" } });
+          emit({ type: "message_start", message: { role: "user", content: command.message } });
+          emit({ type: "message_start", message: { role: "assistant" } });
+          delta("新答案只写了一半");
+        }
+      });
+    `, { requestUI: () => ({ cancelled: true }) });
+    const call = (name: string, params: Record<string, unknown>) =>
+      toolByName(tools, name).execute(name, params, new AbortController().signal, undefined, { cwd: root, hasUI: true });
+    try {
+      const start = await call("subagent", { agent: "scout", task: "检查", background: true });
+      const id = start.details.results[0].id;
+      await vi.waitFor(() => expect(factory.listTasks()[0].liveOutput).toBe("第一轮输出中"), { timeout: 5000 });
+      expect((await call("subagent_send", { id, message: "再查一项" })).isError).toBeFalsy();
+      await vi.waitFor(() => expect(factory.listTasks()[0].liveOutput).toBe("新答案只写了一半"), { timeout: 5000 });
+      await call("subagent_stop", { id });
+      const waited = await call("subagent_wait", { ids: [id], timeoutMs: 8000 });
+      expect(waited.details.results[0]).toMatchObject({
+        status: "interrupted", stopReason: "aborted", output: "新答案只写了一半",
+      });
+    } finally {
+      await factory.stopAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("空闲时把窗口内完成的后台结果合并成一次宿主回合", async () => {
     const prepareHostTurn = vi.fn();
@@ -2124,7 +2246,12 @@ describe("Pi 后台子 Agent", () => {
 
       expect(factory.listTasks().map((entry: { id: string }) => entry.id)).toContain(taskId);
       expect(factory.stopTask(taskId)).toBe(true);
+      const stopped = await toolByName(tools, "subagent_wait").execute(
+        "wait-reloaded-stop", { ids: [taskId], timeoutMs: 8000 }, new AbortController().signal, undefined, { cwd: root },
+      );
+      expect(stopped.details.results[0].status).toBe("interrupted");
     } finally {
+      await factory.stopAll();
       await rm(root, { recursive: true, force: true });
     }
   }, 20_000);
@@ -2287,6 +2414,570 @@ describe("Pi 后台子 Agent", () => {
   });
 });
 
+/**
+ * worker 重建（reload / 重启进程）后，任务表、隔离登记这些内存状态都会丢。
+ * 落盘记录能不能按同一个会话恢复、能不能拒绕开别的会话，只能靠这层验证。
+ */
+describe("Pi 子任务持久化恢复", () => {
+  const cliSource = [
+    "import { writeFileSync } from 'node:fs';",
+    "const sessionIndex = process.argv.indexOf('--session');",
+    "if (sessionIndex >= 0) { try { writeFileSync(process.argv[sessionIndex + 1], ''); } catch {} }",
+    "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'pool/a'}})+'\\n');",
+  ].join("\n");
+
+  /** 在同一个数据目录上重新构造扩展实例，模拟 worker 重建。 */
+  const createBoot = async (source: string) => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-restore-"));
+    const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+    await mkdir(cliDir, { recursive: true });
+    await writeFile(join(cliDir, "cli.js"), source, "utf8");
+    const boot = (overrides: Record<string, unknown> = {}) => {
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir: join(root, "agent"),
+        subagentDataDir: join(root, "subs"),
+        worktreeBaseDir: join(root, "worktrees"),
+        projectPath: root,
+        sessionKey: "parent-1",
+        subagentConfig: { enabled: true, pool: [{ model: "pool/a" }] },
+        ...overrides,
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      return tools;
+    };
+    return { root, boot };
+  };
+
+  const signal = () => new AbortController().signal;
+  const toolByName = (tools: Array<Record<string, any>>, name: string) =>
+    tools.find((tool) => tool.name === name);
+
+  it("重建后同会话能恢复已结束任务，并沿原会话续聊", async () => {
+    const { root, boot } = await createBoot(cliSource);
+    try {
+      const first = boot();
+      const started = await toolByName(first, "subagent").execute(
+        "call-restore-start",
+        { agent: "scout", task: "第一轮", title: "第一轮", background: true },
+        signal(),
+        undefined,
+        { cwd: root, model: { provider: "test", id: "parent" }, hasUI: false },
+      );
+      const taskId = started.details.results[0].id as string;
+      const waited = await toolByName(first, "subagent_wait").execute(
+        "call-restore-wait", { ids: [taskId], timeoutMs: 8000 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(waited.details.results[0]).toMatchObject({ status: "completed" });
+      const sessionFile = waited.details.results[0].sessionFile as string;
+      expect(sessionFile).toContain(taskId);
+
+      // 新实例：内存任务表为空，只能靠落盘记录恢复。
+      const reopened = boot();
+      const restored = await toolByName(reopened, "subagent_wait").execute(
+        "call-restored-wait", { ids: [taskId], timeoutMs: 0 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(restored.isError).toBeUndefined();
+      expect(restored.details.results[0]).toMatchObject({
+        id: taskId,
+        status: "completed",
+        background: true,
+        agent: "scout",
+        title: "第一轮",
+        sessionFile,
+      });
+      expect(String(restored.details.results[0].output)).toContain("第一轮");
+      expect(String(restored.content[0].text)).toContain("已完成");
+
+      const sent = await toolByName(reopened, "subagent_send").execute(
+        "call-restored-send",
+        { id: taskId, message: "继续检查", background: false },
+        signal(),
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(sent.isError).toBeFalsy();
+      const argv = String(sent.content[0].text);
+      // 续聊必须回到原会话文件，否则子 Agent 会丢掉上一轮的上下文。
+      expect(argv).toContain(`--session|${sessionFile}`);
+      expect(argv).toContain("继续检查");
+      expect(argv).toContain("--model|pool/a");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("运行中崩溃的任务恢复后标为已中断，并可以从保存的会话续聊", async () => {
+    // 第一轮模拟进程被强杀（一直不结束），第二轮验证续聊能正常回到原会话。
+    const { root, boot } = await createBoot([
+      "import { writeFileSync } from 'node:fs';",
+      "const sessionIndex = process.argv.indexOf('--session');",
+      "if (sessionIndex >= 0) { try { writeFileSync(process.argv[sessionIndex + 1], ''); } catch {} }",
+      "if (process.argv.join(' ').includes('跑很久')) { setInterval(() => {}, 1000); } else {",
+      "  process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:process.argv.join('|')}], stopReason:'stop', model:'pool/a'}})+'\\n');",
+      "}",
+    ].join("\n"));
+    try {
+      const first = boot();
+      const started = await toolByName(first, "subagent").execute(
+        "call-interrupted-start",
+        { agent: "scout", task: "跑很久", background: true },
+        signal(),
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      const taskId = started.details.results[0].id as string;
+      // 等子进程真正启动、会话文件写完，再丢掉这个实例（模拟进程被杀）。
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      // 崩溃现场：落盘记录停在非终态。
+      const recordFile = join(root, "subs", "parent-1", `${taskId}.task.json`);
+      const crashSnapshot = await readFile(recordFile, "utf8");
+      expect(JSON.parse(crashSnapshot).status).not.toBe("completed");
+      // 收抬子进程，否则 Windows 上临时目录/子进程会被卡住。
+      await toolByName(first, "subagent_stop").execute(
+        "call-interrupted-cleanup", { id: taskId }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      await toolByName(first, "subagent_wait").execute(
+        "call-interrupted-cleanup-wait", { ids: [taskId], timeoutMs: 8000 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      // 把记录退回「进程在运行中被杀掉」的那一刻。
+      await writeFile(recordFile, crashSnapshot, "utf8");
+
+      const reopened = boot();
+      const restored = await toolByName(reopened, "subagent_wait").execute(
+        "call-interrupted-wait", { ids: [taskId], timeoutMs: 0 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(restored.details.results[0]).toMatchObject({ id: taskId, status: "interrupted" });
+      expect(String(restored.details.results[0].errorMessage)).toContain("上一次执行进程已退出");
+      // 恢复后的记录本身也要改写成终态，否则下一次重建又是「运行中」。
+      expect(JSON.parse(await readFile(recordFile, "utf8")).status).toBe("interrupted");
+      // 不能再被 stop 卡住：已经从「运行中」收敛成终态。
+      const stopped = await toolByName(reopened, "subagent_stop").execute(
+        "call-interrupted-stop", { id: taskId }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(stopped.isError).toBeUndefined();
+      expect(String(stopped.content[0].text)).toContain("已经结束");
+
+      // 会话文件还在，续聊能继续用。
+      const sent = await toolByName(reopened, "subagent_send").execute(
+        "call-interrupted-send",
+        { id: taskId, message: "继续检查", background: false },
+        signal(),
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      expect(sent.isError).toBeFalsy();
+      expect(String(sent.content[0].text)).toContain("继续检查");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("跨会话不能看到或续聊别的会话留下的任务", async () => {
+    const { root, boot } = await createBoot(cliSource);
+    try {
+      const first = boot();
+      const started = await toolByName(first, "subagent").execute(
+        "call-cross-start",
+        { agent: "scout", task: "只属于会话一", background: true },
+        signal(),
+        undefined,
+        { cwd: root, hasUI: false },
+      );
+      const taskId = started.details.results[0].id as string;
+      await toolByName(first, "subagent_wait").execute(
+        "call-cross-wait", { ids: [taskId], timeoutMs: 8000 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+
+      const other = boot({ sessionKey: "parent-2" });
+      const waited = await toolByName(other, "subagent_wait").execute(
+        "call-cross-wait-other", { ids: [taskId], timeoutMs: 0 }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(waited.isError).toBe(true);
+      expect(String(waited.content[0].text)).toContain("未知的后台任务");
+
+      const sent = await toolByName(other, "subagent_send").execute(
+        "call-cross-send", { id: taskId, message: "让我续聊" }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(sent.isError).toBe(true);
+      expect(String(sent.content[0].text)).toContain("未知的后台任务");
+
+      const applied = await toolByName(other, "subagent_apply").execute(
+        "call-cross-apply", { id: taskId }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(applied.isError).toBe(true);
+      expect(String(applied.content[0].text)).toContain("未知的隔离任务");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+/** 隔离工作区描述也落在会话目录里，重建后只能靠它找到分支并合回主工作区。 */
+describe("Pi 隔离工作区持久化恢复", () => {
+  const signal = () => new AbortController().signal;
+  const toolByName = (tools: Array<Record<string, any>>, name: string) =>
+    tools.find((tool) => tool.name === name);
+
+  const createRepoBoot = async (source?: string) => {
+    const root = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-wt-restore-"));
+    const worktreeBase = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-wt-restore-base-"));
+    const cliDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+    await mkdir(cliDir, { recursive: true });
+    await writeFile(join(cliDir, "cli.js"), source ?? [
+      "import { writeFileSync } from 'node:fs';",
+      "writeFileSync('isolation.txt', 'from subagent\\n');",
+      "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'done'}], stopReason:'stop'}})+'\\n');",
+    ].join("\n"), "utf8");
+    await writeFile(join(root, "app.txt"), "base\n", "utf8");
+    await writeFile(join(root, ".gitignore"), "node_modules/\nsubs/\n", "utf8");
+    const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "test@example.com"]);
+    git(["config", "user.name", "Test"]);
+    git(["add", "app.txt", ".gitignore"]);
+    git(["commit", "-q", "-m", "base"]);
+    const boot = (overrides: Record<string, unknown> = {}) => {
+      const factory = createHppSubagentExtension({
+        packageRoot: root,
+        agentDir: join(root, "agent"),
+        subagentDataDir: join(root, "subs"),
+        worktreeBaseDir: worktreeBase,
+        projectPath: root,
+        sessionKey: "parent-1",
+        ...overrides,
+      });
+      const tools: Array<Record<string, any>> = [];
+      factory({ registerTool: (tool: Record<string, any>) => tools.push(tool) });
+      return tools;
+    };
+    return { root, worktreeBase, boot, git };
+  };
+
+  const runIsolatedTask = async (tools: Array<Record<string, any>>, root: string) => {
+    const started = await toolByName(tools, "subagent").execute(
+      "call-wt-start",
+      { agent: "worker", task: "写个文件", isolation: "worktree", background: true },
+      signal(),
+      undefined,
+      { cwd: root, hasUI: false },
+    );
+    const id = started.details.results[0].id as string;
+    const waited = await toolByName(tools, "subagent_wait").execute(
+      "call-wt-wait", { ids: [id], timeoutMs: 15000 }, signal(), undefined, { cwd: root, hasUI: false },
+    );
+    expect(waited.details.results[0].status).toBe("completed");
+    return { id, worktree: waited.details.results[0].worktree };
+  };
+
+  const worktreeCli = `
+    import { createInterface } from "node:readline";
+    import { execFileSync } from "node:child_process";
+    import { readFileSync, writeFileSync } from "node:fs";
+    const emit = (event) => console.log(JSON.stringify(event));
+    const answer = (text) => emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: text } });
+    createInterface({ input: process.stdin }).on("line", (line) => {
+      const command = JSON.parse(line);
+      if (command.type !== "prompt") return;
+      const index = process.argv.indexOf("--session");
+      if (index !== -1) writeFileSync(process.argv[index + 1], "{}\\n");
+      if (command.message === "继续") {
+        const before = readFileSync("partial.txt", "utf8");
+        writeFileSync("partial.txt", before + " + resumed");
+        answer("已续写");
+        emit({ type: "agent_settled", aborted: false });
+        return;
+      }
+      writeFileSync("committed.txt", "child commit");
+      execFileSync("git", ["add", "committed.txt"]);
+      execFileSync("git", ["commit", "-qm", "child commit"]);
+      writeFileSync("partial.txt", "saved work");
+      if (command.message === "完成") answer("已写好");
+      else emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "正在写" } });
+    });
+  `;
+
+  const callInProject = (tools: Array<Record<string, any>>, root: string) => (
+    name: string, params: Record<string, unknown>,
+  ) => toolByName(tools, name).execute(name, params, signal(), undefined, { cwd: root, hasUI: true });
+
+  it.each(["完成", "中途"])("后台隔离链在%s时停止，工作区与最终状态一致", async (task) => {
+    const { root, worktreeBase, boot } = await createRepoBoot(worktreeCli);
+    const call = callInProject(boot({ requestUI: () => ({ cancelled: true }) }), root);
+    let id = "";
+    try {
+      const started = await call("subagent", { chain: [{ agent: "worker", task, isolation: "worktree" }], background: true });
+      id = started.details.results[0].id;
+      const completed = task === "完成";
+      await vi.waitFor(async () => {
+        const result = (await call("subagent_wait", { ids: [id], timeoutMs: 0 })).details.results[0];
+        expect(completed ? result.output : result.liveOutput).toBe(completed ? "已写好" : "正在写");
+      }, { timeout: 12000 });
+      expect((await call("subagent_apply", { id })).isError).toBe(true);
+      await call("subagent_stop", { id });
+      const result = (await call("subagent_wait", { ids: [id], timeoutMs: 8000 })).details.results[0];
+      expect(result.status).toBe(completed ? "completed" : "interrupted");
+      expect(result.worktree.changed).toBe(completed);
+      expect(existsSync(result.worktree.path)).toBe(completed);
+      if (completed) {
+        expect((await call("subagent_apply", { id })).details.worktree.applied).toBe(true);
+        expect(await readFile(join(root, "partial.txt"), "utf8")).toBe("saved work");
+      } else {
+        expect(result.worktree.discarded).toBe(true);
+      }
+    } finally {
+      if (id) {
+        await call("subagent_stop", { id });
+        await call("subagent_wait", { ids: [id], timeoutMs: 8000 });
+      }
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 35_000);
+
+  // 等子进程报告已写盘，再只终止本测试的宿主进程。RPC 子进程随输入管道关闭而退出。
+  const crashWithWorktree = async (root: string, worktreeBase: string): Promise<string> => {
+    const extensionUrl = new URL("./subagent-extension.mjs", import.meta.url).href;
+    const host = spawn(process.execPath, ["--input-type=module", "-e", `
+      import { createHppSubagentExtension } from ${JSON.stringify(extensionUrl)};
+      import { join } from "node:path";
+      const [cwd, baseDir] = process.argv.slice(1);
+      const tools = {};
+      const factory = createHppSubagentExtension({
+        packageRoot: cwd, agentDir: join(cwd, "agent"), projectPath: cwd, sessionKey: "parent-1",
+        subagentDataDir: join(cwd, "subs"), worktreeBaseDir: baseDir, requestUI: () => ({ cancelled: true }),
+        emitBackgroundEvent(event) {
+          const result = event.partialResult?.details.results[0];
+          if (result?.liveOutput === "正在写") process.send(result.id);
+        },
+      });
+      factory({ registerTool(tool) { tools[tool.name] = tool; } });
+      await tools.subagent.execute("crash", { agent: "worker", task: "中途", background: true, isolation: "worktree" },
+        new AbortController().signal, undefined, { cwd, hasUI: true });
+    `, root, worktreeBase], { windowsHide: true, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    try {
+      const [id] = await once(host, "message", { signal: AbortSignal.timeout(12000) });
+      return id as string;
+    } finally {
+      if (host.exitCode === null && host.signalCode === null) {
+        const exited = once(host, "exit");
+        host.kill();
+        await exited;
+      }
+    }
+  };
+
+  it.each(["直接合并", "原工作区续聊", "旧记录恢复"])("隔离任务进程崩溃后支持%s", async (mode) => {
+    const { root, worktreeBase, boot, git } = await createRepoBoot(worktreeCli);
+    try {
+      // 触发包含未跟踪文件的基线提交，旧任务恢复也不能把这份本地文件并入补丁。
+      await writeFile(join(root, "local-only.txt"), "main draft");
+      const id = await crashWithWorktree(root, worktreeBase);
+      const taskFile = join(root, "subs", "parent-1", id + ".task.json");
+      const snapshot = JSON.parse(await readFile(taskFile, "utf8"));
+      expect(snapshot.worktree).toMatchObject({ id, pendingFinalization: true });
+      if (mode === "旧记录恢复") {
+        delete snapshot.worktree;
+        snapshot.status = "queued";
+        await writeFile(taskFile, JSON.stringify(snapshot));
+        await rm(join(root, "subs", "parent-1", id + ".worktree.json"));
+      }
+      const call = callInProject(boot({ requestUI: () => ({ cancelled: true }) }), root);
+      const restored = (await call("subagent_wait", { ids: [id], timeoutMs: 0 })).details.results[0];
+      expect(restored).toMatchObject({ status: "interrupted", worktree: { id, pendingFinalization: true } });
+      expect(await readFile(join(restored.worktree.path, "partial.txt"), "utf8")).toBe("saved work");
+      if (mode === "原工作区续聊") {
+        const sent = await call("subagent_send", { id, message: "继续", background: false });
+        expect(sent.isError).toBeFalsy();
+        expect(sent.details.results[0]).toMatchObject({ status: "completed", worktree: { path: restored.worktree.path, changed: true } });
+      }
+      expect(existsSync(join(root, "partial.txt"))).toBe(false);
+      const applied = await call("subagent_apply", { id });
+      expect(applied.details.worktree.applied).toBe(true);
+      expect(await readFile(join(root, "partial.txt"), "utf8")).toBe(mode === "原工作区续聊" ? "saved work + resumed" : "saved work");
+      expect(await readFile(join(root, "committed.txt"), "utf8")).toBe("child commit");
+      expect(git(["ls-files", "--", "local-only.txt"]).trim()).toBe("");
+      expect(existsSync(restored.worktree.path)).toBe(false);
+      const again = await callInProject(boot(), root)("subagent_apply", { id });
+      expect(again.content[0].text).toContain("已经合并");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("重建后仍能用落盘记录合回主工作区，且不会重复合并", async () => {
+    const { root, worktreeBase, boot } = await createRepoBoot();
+    try {
+      const { id, worktree } = await runIsolatedTask(boot(), root);
+      expect(worktree).toMatchObject({ changed: true });
+      expect(existsSync(join(root, "subs", "parent-1", `${id}.worktree.json`))).toBe(true);
+      expect(existsSync(join(root, "isolation.txt"))).toBe(false);
+
+      // 新实例：isolatedTasks 是空的，只能从会话目录读回隔离描述。
+      const pending = boot();
+      // 未合并的隔离任务不能续聊：新工作区会丢掉原分支状态。
+      const blockedSend = await toolByName(pending, "subagent_send").execute(
+        "call-wt-send-blocked", { id, message: "继续" }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(blockedSend.isError).toBe(true);
+      expect(String(blockedSend.content[0].text)).toContain("subagent_apply");
+
+      const applied = await toolByName(pending, "subagent_apply").execute(
+        "call-wt-apply", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(applied.isError).toBeUndefined();
+      expect(await readFile(join(root, "isolation.txt"), "utf8")).toContain("from subagent");
+      expect(existsSync(worktree.path)).toBe(false);
+
+      // 「已合并」也要落盘：再次重建后不能把旧分支/旧工作区当成待合并。
+      const again = await toolByName(boot(), "subagent_apply").execute(
+        "call-wt-apply-again", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(again.isError).toBeUndefined();
+      expect(String(again.content[0].text)).toContain("已经合并");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("收尾失败的隔离工作区在重建后不会被当成「没有改动」", async () => {
+    // 子 Agent 在隔离工作区里留下 index.lock：收尾的 `git add` 会失败。
+    // 这是真实的收尾失败（进程被杀 / 磁盘满 / 别名引锁），以前落盘的记录只有
+    // 原始 worktree，没有 changed 也没有 error，重建后 apply 会报「没有产生文件改动」。
+    const { root, worktreeBase, boot } = await createRepoBoot([
+      "import { execFileSync } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "writeFileSync('isolation.txt', 'from subagent\\n');",
+      "const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim();",
+      "writeFileSync(gitDir + '/index.lock', '');",
+      "process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'done'}], stopReason:'stop'}})+'\\n');",
+    ].join("\n"));
+    try {
+      const { id, worktree } = await runIsolatedTask(boot(), root);
+      expect(String(worktree.error)).toContain("提交隔离工作区失败");
+      // 现场没被删：子 Agent 的改动还在工作区里。
+      expect(existsSync(join(worktree.path, "isolation.txt"))).toBe(true);
+
+      const restored = boot();
+      const applied = await toolByName(restored, "subagent_apply").execute(
+        "call-wt-failed-apply", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      const text = String(applied.content[0].text);
+      expect(applied.isError).toBe(true);
+      expect(text).not.toContain("没有产生文件改动");
+      expect(text).toContain("收尾失败");
+      // 要直接告诉用户现场在哪，否则这个工作区/分支就无人知晓了。
+      expect(text).toContain(worktree.path);
+      expect(existsSync(worktree.path)).toBe(true);
+
+      // 也不能当作「无改动」直接续聊：新工作区会丢掉这个未提交的现场。
+      const sent = await toolByName(restored, "subagent_send").execute(
+        "call-wt-failed-send", { id, message: "继续" }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(sent.isError).toBe(true);
+      expect(String(sent.content[0].text)).toContain("收尾失败");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("重试后的工作区（-rN）重建后仍能认领并合回", async () => {
+    const attemptFile = join(tmpdir(), `hpp-pi-wt-retry-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+    process.env.HPP_TEST_ATTEMPT_FILE = attemptFile;
+    const { root, worktreeBase, boot } = await createRepoBoot([
+      "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      "const file = process.env.HPP_TEST_ATTEMPT_FILE;",
+      "const attempt = existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0;",
+      "writeFileSync(file, String(attempt + 1));",
+      "if (attempt === 0) {",
+      "  process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[], stopReason:'error', errorMessage:'overloaded'}})+'\\n');",
+      "} else {",
+      "  writeFileSync('isolation.txt', 'from retried subagent\\n');",
+      "  process.stdout.write(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'done'}], stopReason:'stop'}})+'\\n');",
+      "}",
+    ].join("\n"));
+    try {
+      const { id, worktree } = await runIsolatedTask(boot({ retryDelaysMs: [1] }), root);
+      // 重试换新物理 id，工作区目录/分支都带 -r1 后缀。
+      expect(worktree.id).toBe(`${id}-r1`);
+      expect(worktree.branch).toBe(`hpp-sub/${id}-r1`);
+      expect(existsSync(join(root, "subs", "parent-1", `${id}-r1.worktree.json`))).toBe(true);
+
+      const applied = await toolByName(boot(), "subagent_apply").execute(
+        "call-wt-retry-apply", { id: `${id}-r1` }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(applied.isError).toBeUndefined();
+      expect(await readFile(join(root, "isolation.txt"), "utf8")).toContain("from retried subagent");
+      // 用任务 id 再 apply 一次：已合并状态也落盘了，不应重复合并/删现场。
+      const byTaskId = await toolByName(boot(), "subagent_apply").execute(
+        "call-wt-retry-apply-task", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(byTaskId.isError).toBeUndefined();
+      expect(String(byTaskId.content[0].text)).toContain("已经合并");
+    } finally {
+      delete process.env.HPP_TEST_ATTEMPT_FILE;
+      await rm(attemptFile, { force: true });
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("拒绝被改过的工作区元数据，不执行 git apply", async () => {
+    const { root, worktreeBase, boot, git } = await createRepoBoot();
+    try {
+      const { id, worktree } = await runIsolatedTask(boot(), root);
+      const recordFile = join(root, "subs", "parent-1", `${id}.worktree.json`);
+      const record = JSON.parse(await readFile(recordFile, "utf8"));
+
+      // 把工作区路径改到约定之外：以前会直接拿它当 git 仓库路径执行。
+      await writeFile(recordFile, JSON.stringify({
+        ...record,
+        worktree: { ...record.worktree, worktreePath: join(root, "elsewhere") },
+      }), "utf8");
+      const rejected = await toolByName(boot(), "subagent_apply").execute(
+        "call-wt-tampered", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(rejected.isError).toBe(true);
+      expect(String(rejected.content[0].text)).toContain("不匹配");
+      expect(existsSync(join(root, "isolation.txt"))).toBe(false);
+      expect(existsSync(worktree.path)).toBe(true);
+
+      // 分支名对不上也不行，否则可能合入别的任务的分支。
+      await writeFile(recordFile, JSON.stringify({
+        ...record,
+        worktree: { ...record.worktree, branch: "main" },
+      }), "utf8");
+      const wrongBranch = await toolByName(boot(), "subagent_apply").execute(
+        "call-wt-wrong-branch", { id }, signal(), undefined, { cwd: root, hasUI: false },
+      );
+      expect(wrongBranch.isError).toBe(true);
+      expect(existsSync(join(root, "isolation.txt"))).toBe(false);
+
+      // 恢复记录属于其他项目时也不合入。
+      await writeFile(recordFile, JSON.stringify(record), "utf8");
+      const otherProject = await mkdtemp(join(tmpdir(), "hpp-pi-subagent-wt-other-"));
+      try {
+        const moved = await toolByName(boot({ projectPath: otherProject }), "subagent_apply").execute(
+          "call-wt-other-project", { id }, signal(), undefined, { cwd: otherProject, hasUI: false },
+        );
+        expect(moved.isError).toBe(true);
+        expect(String(moved.content[0].text)).toContain("不匹配");
+      } finally {
+        await rm(otherProject, { recursive: true, force: true });
+      }
+      expect(existsSync(join(root, "isolation.txt"))).toBe(false);
+      // 本地分支没被动过：仍然可以手动合。
+      expect(git(["show", `${worktree.branch}:isolation.txt`])).toContain("from subagent");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(worktreeBase, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
 /**
  * 回归：子 Agent 单条 JSONL 记录（例如带完整文件内容的 tool_execution_end）
  * 曾超过旧的 256KB 上限就被直接终止，用户看到「子 Agent 协议输出超过

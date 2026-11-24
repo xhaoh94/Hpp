@@ -11,6 +11,7 @@ import { registerStorageUsageHandlers } from "./ipc/storage-usage-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
+import { initializeModelContextCatalog } from "./agents/model-context-catalog";
 import { registerWorktreeIpc } from "./worktree/ipc";
 import { registerGitIpc } from "./git/ipc";
 import { registerChannelSyncHandlers } from "./sync/channel-sync";
@@ -518,6 +519,11 @@ if (singleInstanceLock) {
     });
 
     await loadCloseToTraySetting();
+    // 模型上下文窗口目录：内置快照同步读起来，在线刷新放后台（每天最多一次），
+    // 失败只是继续用旧数据，绝不阻塞启动。
+    void initializeModelContextCatalog().catch((error) => {
+      console.warn("[Hpp] model context catalog unavailable:", error?.message || error);
+    });
     void loadGlobalQuickAskFromSettings(join(app.getPath("userData"), "hpp-data", "settings.json")).then((result) => {
       if (!result.ok) console.warn("[Hpp] global quick ask shortcut unavailable:", result.error);
     });

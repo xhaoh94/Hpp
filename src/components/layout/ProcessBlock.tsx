@@ -435,7 +435,10 @@ function SubagentEntryRow({
           {/* 第一级：任务摘要 —— 派给子任务的任务说明 + 状态 + 用量，一屏看全。 */}
           <div className="chat-subagent-summary">
             <div className="chat-subagent-summary-head">
-              <span className={`chat-subagent-status status-${expanded?.status || "unknown"}`}>
+              <span
+                className={`chat-subagent-status status-${expanded?.status || "unknown"}`}
+                title={expanded?.stopDetail || undefined}
+              >
                 {formatSubagentStatusLabel(expanded?.status, expanded?.stopReason) || expanded?.label}
               </span>
               <span className="chat-subagent-usage-meta">
@@ -1183,8 +1186,10 @@ export function ProcessBlock({
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const interrupted = useMemo(
-    () => isProcessInterrupted(viewProcess.entries),
-    [viewProcess.entries]
+    () => (viewProcess.turnState
+      ? viewProcess.turnState === "interrupted"
+      : isProcessInterrupted(viewProcess.entries)),
+    [viewProcess.turnState, viewProcess.entries]
   );
   // 简洁档把独立的 commentary 正文折成一个 narration 条目，和 process 里的
   // 正文一起参与两段合并；时间线分支因此不再单独渲染 commentary，正文才不会散开。

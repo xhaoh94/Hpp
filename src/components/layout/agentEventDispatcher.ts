@@ -598,28 +598,48 @@ export function dispatchAgentEvent(event: AgentEvent, controller: AgentEventRunt
               return id && label && Number.isFinite(tokens) && tokens > 0 ? [{ id, label, tokens }] : [];
             })
           : undefined;
-        const resolvedWindow = Number.isFinite(contextWindow) && contextWindow > 0
-          ? contextWindow
-          : usageModel?.contextWindow;
+        // 分母优先取模型目录里的窗口（Hpp 已用 models.dev 统一过），后端事件里的
+        // 数值只做兜底：四家口径不同，同一个模型在不同插件里会算出不同比例。
+        const resolvedWindow = usageModel?.contextWindow
+          || (Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : undefined);
         // 压缩（摘要）请求自己的用量：照常计入上面的 Token 统计，
         // 但它的输入是压缩前的整段历史，不能当成压缩后的上下文占用，
         // 否则圆环会停在压缩前的大小，看起来像「压缩没生效」。
         if (event.compaction !== true && (usedTokens > 0 || resolvedWindow)) {
+          const previousUsage = useChatStore.getState().contextUsageBySession[currentSessionId];
+          // 只报窗口、不报用量的事件（切模型或后端重建后很常见）不能把已有读数
+          // 抹成空：同一个模型的上一次读数仍然有效，等真正的用量事件再覆盖。
+          const canInherit = previousUsage
+            && (!previousUsage.model || !usageModel
+              || (previousUsage.model.provider === usageModel.provider
+                && previousUsage.model.id === usageModel.id));
+          const effectiveUsedTokens = usedTokens > 0
+            ? usedTokens
+            : canInherit
+              ? previousUsage.usedTokens
+              : undefined;
           const nextUsage = {
             contextWindow: resolvedWindow,
-            usedTokens: usedTokens > 0 ? usedTokens : undefined,
-            remainingTokens: resolvedWindow && usedTokens > 0
-              ? Math.max(0, resolvedWindow - usedTokens)
+            usedTokens: effectiveUsedTokens,
+            remainingTokens: resolvedWindow && effectiveUsedTokens !== undefined
+              ? Math.max(0, resolvedWindow - effectiveUsedTokens)
               : undefined,
-            usageRatio: resolvedWindow && usedTokens > 0
-              ? Math.min(1, usedTokens / resolvedWindow)
+            usageRatio: resolvedWindow && effectiveUsedTokens !== undefined
+              ? Math.min(1, effectiveUsedTokens / resolvedWindow)
               : undefined,
-            source: resolveContextUsagePrecision(event),
-            ...(breakdown && breakdown.length > 0 ? { breakdown } : {}),
+            source: usedTokens > 0
+              ? resolveContextUsagePrecision(event)
+              : previousUsage?.source ?? resolveContextUsagePrecision(event),
+            ...(breakdown && breakdown.length > 0
+              ? { breakdown }
+              : canInherit && previousUsage?.breakdown?.length
+                ? { breakdown: previousUsage.breakdown }
+                : {}),
             model: usageModel
               ? { provider: usageModel.provider, id: usageModel.id }
-              : undefined,
-            updatedAt: Date.now(),
+              : previousUsage?.model,
+            // 读数没更新时保留原来的时间，避免看起来刚刚上报过。
+            updatedAt: usedTokens > 0 ? Date.now() : previousUsage?.updatedAt ?? Date.now(),
           };
           chat.setSessionContextUsage(currentSessionId, nextUsage);
           // 事件流重启后不会重放，因此同步落盘，供下次启动直接显示。

@@ -173,6 +173,18 @@ describe("ContextCompactionController", () => {
     expect(compact).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the catalog window when the backend reports a different one", async () => {
+    const { controller, compact } = createHarness();
+    // 目录窗口 1M，codex 照自己的口径只报 258k：分母不能被事件改小，
+    // 否则同一个模型在 pi 里 26% 到 codex 里就变成 100%。
+    controller.setSessionContextWindow(SESSION, 1_000_000);
+    controller.observeEvent(SESSION, startTurn);
+    controller.observeEvent(SESSION, { type: "token_usage", contextTokens: 300_000, contextWindow: 258_400 });
+    controller.observeEvent(SESSION, endTurn);
+    await flush();
+    expect(compact).not.toHaveBeenCalled();
+  });
+
   it("never compacts just because a context window arrived", async () => {
     const { controller, compact } = createHarness();
     controller.observeEvent(SESSION, startTurn);

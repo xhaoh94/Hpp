@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { copyFile, mkdir, rmdir, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const MAX_UNTRACKED_COPY_BYTES = 50 * 1024 * 1024;
 
@@ -66,6 +66,17 @@ const sanitizeSegment = (value) => (
 );
 
 const hashProject = (repoRoot) => createHash("sha1").update(repoRoot).digest("hex").slice(0, 10);
+const baselineMessage = "hpp subagent baseline: untracked files";
+
+export const isStoredSubagentWorktree = (info, baseDir, projectCwd) => {
+  if (!info || !baseDir || !projectCwd || !info.repoRoot || !info.projectRoot || !info.worktreePath) return false;
+  if (!/^(sa|w)_[a-z0-9]+(?:-r\d+)?$/.test(info.id) || !/^[a-f0-9]{40,64}$/.test(info.baseCommit)) return false;
+  const expected = join(baseDir, hashProject(info.repoRoot), `sub-${info.id}`);
+  const branch = `hpp-sub/${info.id}`;
+  return !relative(info.projectRoot, projectCwd) && isWithin(info.repoRoot, projectCwd)
+    && !relative(expected, info.worktreePath)
+    && (info.branch === branch || (typeof info.branch === "string" && info.branch.startsWith(branch + "-") && /^[a-z0-9]+$/.test(info.branch.slice(branch.length + 1))));
+};
 
 const isWithin = (root, candidate) => {
   const path = relative(root, candidate);
@@ -75,6 +86,68 @@ const isWithin = (root, candidate) => {
 const listUntracked = async (repoRoot) => {
   const output = await git(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
   return output.split("\0").filter(Boolean);
+};
+
+/** 只认领当前仓库登记、属于该任务的 checkout。旧 worker 没有落盘基线时从建分支的 reflog 恢复。 */
+export const recoverSubagentWorktree = async ({ projectCwd, baseDir, taskId, stored }) => {
+  if (!baseDir || !projectCwd || !/^sa_[a-z0-9]+$/.test(taskId)) return null;
+  const projectRoot = resolve(projectCwd);
+  const repository = await run(projectRoot, ["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"]);
+  if (!repository.ok) {
+    if (!stored) return null;
+    throw new Error(`无法打开原 Git 仓库，请检查 ${stored.worktreePath}`);
+  }
+  const [topLevel, commonDir] = repository.stdout.trimEnd().split(/\r?\n/);
+  const repoRoot = resolve(topLevel);
+  const parent = join(baseDir, hashProject(repoRoot));
+  if (stored && (!isStoredSubagentWorktree(stored, baseDir, projectRoot) || relative(stored.repoRoot, repoRoot))) {
+    throw new Error("保存的隔离工作区与当前项目不匹配。");
+  }
+  const list = await git(repoRoot, ["worktree", "list", "--porcelain", "-z"]);
+  const candidates = [];
+  for (const row of list.split("\0\0")) {
+    const fields = row.split("\0");
+    if (!fields[0].startsWith("worktree ")) continue;
+    const worktreePath = resolve(fields[0].slice("worktree ".length));
+    const name = basename(worktreePath);
+    if (relative(parent, dirname(worktreePath)) || !name.startsWith("sub-")) continue;
+    const id = name.slice(4);
+    if (id.replace(/-r\d+$/, "") !== taskId || (stored && id !== stored.id)) continue;
+    const branch = fields.find((field) => field.startsWith("branch refs/heads/"))?.slice("branch refs/heads/".length);
+    candidates.push({ id, branch, worktreePath });
+  }
+  if (!candidates.length && !stored) return null;
+  if (candidates.length !== 1) {
+    throw new Error(candidates.length
+      ? `找到多个隔离工作区，请检查 ${candidates.map((item) => item.worktreePath).join("、")}`
+      : `原隔离工作区已不在 Git 登记中：${stored.worktreePath}`);
+  }
+  const { id, branch, worktreePath } = candidates[0];
+  if (!branch || (stored && branch !== stored.branch) || !existsSync(worktreePath)) {
+    throw new Error(`隔离工作区的路径或检出分支已变化，请检查 ${worktreePath}`);
+  }
+  // Git 登记可能在目录被移走或替换后仍然存在。核实实际 checkout 才能提交、清理或续写。
+  const identity = await git(worktreePath, ["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-common-dir"]);
+  const [actualRoot, actualBranch, actualCommonDir] = identity.trimEnd().split(/\r?\n/);
+  if (!actualCommonDir || relative(actualRoot, worktreePath) || actualBranch !== branch || relative(commonDir, actualCommonDir)) {
+    throw new Error(`实际检出的工作区与任务记录不匹配，请检查 ${worktreePath}`);
+  }
+  let baseCommit = stored?.baseCommit;
+  if (!baseCommit) {
+    const log = await git(repoRoot, ["reflog", "show", "--format=%H%x09%gs", `refs/heads/${branch}`]);
+    const [created, firstCommit] = log.trim().split(/\r?\n/).reverse().map((line) => line.split("\t"));
+    if (!created || created[1] !== `branch: Created from ${created[0]}`) {
+      throw new Error(`无法确认隔离分支的原始基线，请检查 ${worktreePath}`);
+    }
+    baseCommit = firstCommit?.[1] === `commit: ${baselineMessage}` ? firstCommit[0] : created[0];
+  }
+  const projectRelative = relative(repoRoot, projectRoot);
+  const info = { id, repoRoot, projectRoot, projectRelative, worktreePath,
+    rootPath: join(worktreePath, projectRelative), branch, baseCommit };
+  if (!isStoredSubagentWorktree(info, baseDir, projectRoot)) {
+    throw new Error(`隔离工作区与当前任务不匹配，请检查 ${worktreePath}`);
+  }
+  return info;
 };
 
 /**
@@ -163,7 +236,7 @@ export const createSubagentWorktree = async ({ projectCwd, baseDir, taskId }) =>
     await git(worktreePath, [
       "-c", "user.name=Hpp",
       "-c", "user.email=hpp@localhost",
-      "commit", "-q", "-m", "hpp subagent baseline: untracked files",
+      "commit", "-q", "-m", baselineMessage,
     ]);
     baseCommit = (await git(worktreePath, ["rev-parse", "HEAD"])).trim();
   }

@@ -13,12 +13,16 @@ const requiredFiles = [
   "transient-provider-retry.mjs",
   "pi-fork-utils.mjs",
   "pi-agent-dir.mjs",
+  "model-context-window.mjs",
   "shell-environment.mjs",
+  "shell-sessions.mjs",
+  "shell-pty-host.mjs",
   "plan-mode-policy.mjs",
   "subagent-extension.mjs",
   "present-extension.mjs",
   "todo-extension.mjs",
   "subagent-worktree.mjs",
+  "subagent-storage.mjs",
   "subagent-bridge-extension.mjs",
   "subagent-policy.mjs",
   "subagent-prompts/implement.md",
@@ -54,6 +58,16 @@ const run = async () => {
     const workerText = require("node:fs").readFileSync(join(installedMainDir, "pi-sdk-worker.mjs"), "utf8");
     assert.match(workerText, /additionalPromptTemplatePaths/);
     assert.match(workerText, /subagent-prompts/);
+    // 后台终端：worker 依赖的会话模块和它 fork 的 pty host 必须一起进安装目录。
+    assert.match(workerText, /shell-sessions\.mjs/);
+    assert.match(
+      require("node:fs").readFileSync(join(installedMainDir, "shell-sessions.mjs"), "utf8"),
+      /\.\/shell-pty-host\.mjs/,
+    );
+    assert.match(
+      require("node:fs").readFileSync(join(installedMainDir, "shell-pty-host.mjs"), "utf8"),
+      /@lydell\/node-pty/,
+    );
     for (const promptName of ["implement", "scout-and-plan", "implement-and-review"]) {
       const promptText = require("node:fs").readFileSync(
         join(installedMainDir, "subagent-prompts", `${promptName}.md`),
@@ -66,6 +80,13 @@ const run = async () => {
     const bridgeModule = await import(pathToFileURL(join(installedMainDir, "subagent-bridge-extension.mjs")).href);
     assert.equal(typeof extensionModule.createHppSubagentExtension, "function");
     assert.equal(typeof bridgeModule.default, "function");
+    // 带空格的安装路径下，宿主也要能自己解析出同目录的 pty host。
+    const shellModule = await import(pathToFileURL(join(installedMainDir, "shell-sessions.mjs")).href);
+    assert.equal(typeof shellModule.createShellSessions, "function");
+    const shellSessions = shellModule.createShellSessions();
+    assert.equal(typeof shellSessions.start, "function");
+    shellSessions.stopAll();
+    shellSessions.killAll();
 
     const packageRoot = join(tempRoot, "Pi Package Root With Spaces");
     const cliDir = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist");

@@ -1,6 +1,6 @@
 {
   "name": "hpp",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Lightweight terminal project manager",
   "main": "out/main/main.js",
   "scripts": {
@@ -31,7 +31,8 @@
     "release:github": "node scripts/reset-github-release.cjs",
     "release": "node scripts/release-all.cjs",
     "release:build": "node scripts/release-all.cjs --build",
-    "release:linux": "node scripts/release-all.cjs --skip-build --skip-linux"
+    "release:linux": "node scripts/release-all.cjs --skip-build --skip-linux",
+    "catalog:build": "node scripts/build-model-catalog.mjs"
   },
   "keywords": [],
   "author": "",
@@ -78,6 +79,7 @@
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
+    "@lydell/node-pty": "1.1.0",
     "adm-zip": "^0.5.18",
     "electron-updater": "^6.8.9",
     "qrcode": "^1.5.4",

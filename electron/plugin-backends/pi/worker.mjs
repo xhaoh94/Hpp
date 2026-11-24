@@ -16,6 +16,11 @@ import { createHppSubagentExtension, normalizeHppSubagentConfig } from "./subage
 import { createHppPresentExtension } from "./present-extension.mjs";
 import { createHppTodoExtension, TODO_GUIDANCE, TODO_TOOL_NAME } from "./todo-extension.mjs";
 import { installTransientProviderRetry } from "./transient-provider-retry.mjs";
+import { createShellSessions } from "./shell-sessions.mjs";
+import {
+  loadHppContextWindowIndex,
+  resolveHppContextWindow,
+} from "./model-context-window.mjs";
 
 // stdout 是协议通道（一行一个 JSON）。第三方 Pi 扩展或依赖的 console.log 会
 // 和协议行混在一起，宿主只能当「非协议输出」丢掉，排查非常困难。
@@ -335,6 +340,7 @@ let planModeToolNames = [];
 let shellWarning = "";
 let shellNotice = "";
 let shellAvailable = false;
+let shellSessions = createShellSessions();
 let shellWarningEmitted = false;
 let shellEnvironment = { platform: process.platform, shellFamily: "unknown", shellPath: "" };
 let activeCompactionId = null;
@@ -889,6 +895,8 @@ const waitForPromise = (promise, timeoutMs) => new Promise((resolve) => {
 
 const disposeSession = async () => {
   const disposingSession = session;
+  shellSessions.stopAll();
+  shellSessions = createShellSessions();
   // 先回收后台子 Agent：它们不挂在 Pi session 上，session.dispose() 管不到。
   try {
     // backend 侧等 disposed ack 的总预算是 4s + 1.5s 进程退出；这里必须
@@ -1005,6 +1013,7 @@ const shouldRequestPiToolPermission = (event) => {
     if (getToolPaths(event).some(isOutsideProject)) return true;
     return classifyMcpToolPermission(rawToolName) === "ask";
   }
+  if (toolName === "shell_session") return event.input?.action === "write";
   const outsideProject = getToolPaths(event).some(isOutsideProject);
   if (activePermissionMode === "ask") {
     return outsideProject || !READ_ONLY_TOOLS.has(toolName);
@@ -1039,6 +1048,7 @@ const planModeToolBlockReason = (event) => {
     return `Plan 模式为只读模式，不能使用 ${toolName} 修改项目。请关闭 Plan 模式后再实施。`;
   }
   if (toolName === "bash") {
+    if (event.input?.background === true) return "Plan 模式不能启动后台终端。";
     const command = String(isRecord(event?.input) ? event.input.command || "" : "");
     const blockedSegment = findBlockedPlanCommand(command, shellEnvironment.shellFamily);
     return blockedSegment
@@ -1100,7 +1110,7 @@ const registerHppShellTool = (pi) => {
       : shellEnvironment.shellFamily === "bash" || shellEnvironment.shellFamily === "posix"
         ? "POSIX shell"
         : "configured shell";
-  const definition = sdk.createBashToolDefinition(projectPath, {
+  const shellOptions = {
     shellPath: shellEnvironment.shellPath || undefined,
     ...(isPowerShell ? {
       commandPrefix: POWERSHELL_UTF8_COMMAND_PREFIX,
@@ -1109,9 +1119,10 @@ const registerHppShellTool = (pi) => {
         command: rewritePowerShellPackageManagerCommand(context.command),
       }),
     } : {}),
-  });
+  };
+  const definition = sdk.createBashToolDefinition(projectPath, shellOptions);
   definition.label = shellLabel;
-  definition.description = `在当前工作目录执行 ${shellLabel} 命令。注册的工具名称仍为 bash，并返回标准输出和标准错误。调用时请填写 description，用一句中文说明这条命令要做什么。`;
+  definition.description = `在当前工作目录执行 ${shellLabel} 命令。注册的工具名称仍为 bash，并返回标准输出和标准错误；长构建、服务或交互程序可设 background:true，返回可用 shell_session 继续读写的终端 ID。调用时请填写 description，用一句中文说明这条命令要做什么。`;
   definition.promptSnippet = `使用可用的 bash 工具执行 ${shellLabel} 命令`;
   definition.promptGuidelines = [
     ...(definition.promptGuidelines || []),
@@ -1129,6 +1140,7 @@ const registerHppShellTool = (pi) => {
       ...parameters,
       properties: {
         ...properties,
+        background: { type: "boolean", description: "在独立终端中启动并立即返回会话 ID，适用于长命令与交互程序。" },
         description: {
           type: "string",
           description: "必填。一句话说明这条命令要达成什么，动词开头、中文，例如「查看空闲时长的渲染位置」。会显示在处理过程里作为标题。",
@@ -1149,7 +1161,60 @@ const registerHppShellTool = (pi) => {
           };
     };
   }
+  // 后台终端要自己拼 shell 参数：SDK 的本地执行器只在它自己的 exec 里做这一步，
+  // 这里要复用 getShellConfig 的解析结果（PowerShell / cmd / WSL stdin 传输各不相同）。
+  const resolveBackgroundShell = () => {
+    const config = typeof sdk?.getShellConfig === "function"
+      ? sdk.getShellConfig(shellOptions.shellPath)
+      : { shell: shellOptions.shellPath || shellEnvironment.shellPath };
+    const shell = String(config?.shell || shellEnvironment.shellPath || "").trim();
+    if (!shell) throw new Error("没有可用的 Shell，无法启动后台终端。");
+    const flags = isPowerShell ? ["-NoProfile", "-Command"]
+      : shellEnvironment.shellFamily === "cmd" ? ["/d", "/s", "/c"]
+      : config?.commandTransport === "stdin" ? ["-c"]
+      : Array.isArray(config?.args) && config.args.length > 0 ? config.args : ["-c"];
+    return { shell, flags };
+  };
+  const executeForeground = definition.execute;
+  definition.execute = async (id, input, signal, update, ctx) => {
+    if (!input.background) return executeForeground.call(definition, id, input, signal, update, ctx);
+    if (activePlanMode) throw new Error("Plan 模式不能启动后台终端。");
+    const sessions = shellSessions;
+    let started;
+    // 让 SDK 准备原有的 PATH、会话环境、工作目录、PowerShell UTF-8 前缀和命令重写。
+    const launcher = sdk.createBashToolDefinition(projectPath, {
+      ...shellOptions,
+      operations: { exec: async (command, cwd, options) => {
+        const { shell, flags } = resolveBackgroundShell();
+        started = await sessions.start(shell, [...flags, command], cwd, options.env, options.timeout, signal);
+        return { exitCode: 0 };
+      } },
+    });
+    try {
+      const nativeResult = await launcher.execute(id, input, signal, undefined, ctx);
+      return started || nativeResult;
+    } catch (error) {
+      // 终端已经起来了、SDK 收尾却失败：别把进程留在后台。
+      if (started?.details?.sessionId) {
+        await sessions.interact({ id: started.details.sessionId, action: "stop", waitMs: 0 }, undefined).catch(() => {});
+      }
+      throw error;
+    }
+  };
   pi.registerTool(definition);
+  pi.registerTool({
+    name: "shell_session", label: "终端会话",
+    description: "读写 bash(background:true) 返回的终端。write 原样发送文本，回车用 \\r。read 默认从上次读取处继续，重复读取可指定 cursor。stop 终止该终端。",
+    parameters: {
+      type: "object", required: ["id", "action"], additionalProperties: false,
+      properties: {
+        id: { type: "string" }, action: { type: "string", enum: ["read", "write", "stop"] },
+        text: { type: "string" }, cursor: { type: "integer", minimum: 0 },
+        waitMs: { type: "integer", minimum: 0, maximum: 30000 },
+      },
+    },
+    execute: (_id, input, signal) => shellSessions.interact(input, signal),
+  });
 };
 
 const hppPermissionExtension = (pi) => {
@@ -1906,6 +1971,7 @@ const init = async ({ id, projectPath: cwd, sessionFilePath, hostSystemPrompt, c
     canAutoWake: () => canAutoWakeNow(),
     prepareHostTurn,
     worktreeBaseDir: worktreeBaseDir || "",
+    projectPath: cwd,
     // P4：todo 与子 Agent 共享同一个进程内 store。
     getTodoStore: () => activeHppTodoExtension,
     // 后台状态变更不在任何 tool_call 里，必须主动推给 UI。
@@ -2403,8 +2469,13 @@ const countNullThinkingLevels = (map) =>
 // Lazy index of the SDK's built-in catalogue context windows. Hpp-synced
 // models.json entries for custom channels carry only id/name/reasoning/input,
 // so pi reports pi's 128k default for them. When a configured model id also
-// exists in the built-in catalogue, adopt the catalogue window (largest among
-// providers) so custom channels compact on the upstream model's real limit.
+// exists in the built-in catalogue, adopt the catalogue window so custom
+// channels compact on the upstream model's real limit.
+//
+// Hpp 自己的统一目录（models.dev，口径取输入上限）优先于 pi 的 catalogue：
+// pi 的 catalogue 存的是总窗口且同一 id 跨 provider 取了最大值，比真实可用
+// 上限大；界面和 Hpp 的阈值判定都用 Hpp 目录，pi 内部必须跟着同一个分母，
+// 否则「显示 272k、内部按 400k 触发」。目录读不到时才退回 pi 的 catalogue。
 const CATALOGUE_WINDOW_IGNORED_PROVIDERS = ["cloudflare-workers-ai", "cloudflare-ai-gateway"];
 const CATALOGUE_DEFAULT_CONTEXT_WINDOW = 128000;
 const CATALOGUE_DEFAULT_MAX_TOKENS = 16384;
@@ -2413,10 +2484,20 @@ let builtinContextWindowsFailed = false;
 
 const getBuiltinContextWindows = async () => {
   if (builtinContextWindows || builtinContextWindowsFailed) return builtinContextWindows;
+  // Hpp 目录先读：它不依赖 pi SDK，SDK catalogue 建不起来时仍要能生效。
+  // 优先运行时缓存（每日刷新），回退打包时复制到 out/main 的内置快照。
+  const hppIndex = loadHppContextWindowIndex({
+    dataDir: process.env.HPP_DATA_DIR || "",
+    bundledPath: process.env.HPP_MODEL_CONTEXT_CATALOG || "",
+  });
   try {
     if (typeof sdk?.ModelRuntime?.create !== "function" || typeof sdk?.ModelRegistry !== "function") {
-      builtinContextWindowsFailed = true;
-      return null;
+      // 没有 SDK catalogue 不等于没有窗口：Hpp 目录命中时照样按它压缩。
+      builtinContextWindows = hppIndex
+        ? { windows: new Map(), providerIds: new Set(), hppIndex }
+        : null;
+      if (!builtinContextWindows) builtinContextWindowsFailed = true;
+      return builtinContextWindows;
     }
     // modelsPath: null keeps only the built-in catalogue (no custom models.json).
     const runtime = await sdk.ModelRuntime.create({ modelsPath: null });
@@ -2434,16 +2515,27 @@ const getBuiltinContextWindows = async () => {
       const key = String(model.id).toLowerCase();
       if (window > (windows.get(key) || 0)) windows.set(key, window);
     }
-    builtinContextWindows = { windows, providerIds };
+    builtinContextWindows = { windows, providerIds, hppIndex };
     return builtinContextWindows;
   } catch {
-    builtinContextWindowsFailed = true;
-    return null;
+    // SDK catalogue 建不起来时，只要 Hpp 目录可用就继续按它压缩。
+    builtinContextWindows = hppIndex
+      ? { windows: new Map(), providerIds: new Set(), hppIndex }
+      : null;
+    if (!builtinContextWindows) builtinContextWindowsFailed = true;
+    return builtinContextWindows;
   }
 };
 
+/** 某个渠道模型最终采用的窗口：Hpp 目录 → pi catalogue → models.json 声明 → 默认。 */
+const resolveCatalogueWindow = (catalogue, providerId, modelId) => {
+  const fromHpp = resolveHppContextWindow(catalogue.hppIndex, providerId, modelId);
+  if (fromHpp) return fromHpp;
+  return catalogue.windows.get(String(modelId).toLowerCase()) || 0;
+};
+
 /** Rebuild one channel's model list with catalogue-resolved context windows. */
-const buildCatalogueWindowModels = (providerConfig, windows) => {
+const buildCatalogueWindowModels = (providerId, providerConfig, catalogue) => {
   const definitions = isRecord(providerConfig) && Array.isArray(providerConfig.models) ? providerConfig.models : [];
   const overrides = isRecord(providerConfig?.modelOverrides) ? providerConfig.modelOverrides : {};
   const models = [];
@@ -2460,8 +2552,8 @@ const buildCatalogueWindowModels = (providerConfig, windows) => {
       reasoning: definition.reasoning ?? override?.reasoning ?? false,
       input: definition.input ?? override?.input ?? ["text"],
       cost: definition.cost ?? override?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      // Catalogue first, then the window declared in models.json, then pi's default.
-      contextWindow: windows.get(definition.id.toLowerCase()) || declared || CATALOGUE_DEFAULT_CONTEXT_WINDOW,
+      // 目录优先（与 Hpp 界面/阈值分母同一个数），目录没收录的私有模型才用声明值。
+      contextWindow: resolveCatalogueWindow(catalogue, providerId, definition.id) || declared || CATALOGUE_DEFAULT_CONTEXT_WINDOW,
       maxTokens: definition.maxTokens ?? override?.maxTokens ?? CATALOGUE_DEFAULT_MAX_TOKENS,
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       ...(samplingParams ? { samplingParams } : {}),
@@ -2473,17 +2565,18 @@ const buildCatalogueWindowModels = (providerConfig, windows) => {
 
 /**
  * Re-register every custom (non built-in) channel from models.json with
- * context windows resolved from pi's built-in catalogue. Runs once per worker
- * start-up, after the registry loaded models.json and before the session is
- * created, so Hpp sessions compact on the upstream model's real window instead
- * of pi's 128k default. Channels and models the catalogue does not know keep
- * the window declared in models.json.
+ * context windows resolved from Hpp's unified catalogue (pi's own catalogue as
+ * fallback). Runs once per worker start-up, after the registry loaded
+ * models.json and before the session is created, so pi's own auto-compaction
+ * triggers on the same denominator Hpp displays instead of pi's 128k default.
+ * Channels and models neither catalogue knows keep the declared window.
  */
 const applyCatalogueContextWindows = async (modelRuntime) => {
   try {
     if (!modelRuntime || typeof modelRuntime.registerProvider !== "function") return;
     const catalogue = await getBuiltinContextWindows();
-    if (!catalogue || catalogue.windows.size === 0) return;
+    if (!catalogue) return;
+    if (!catalogue.hppIndex && catalogue.windows.size === 0) return;
     const configPath = join(sdk.getAgentDir(), "models.json");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     const providers = isRecord(config?.providers) ? config.providers : null;
@@ -2491,7 +2584,7 @@ const applyCatalogueContextWindows = async (modelRuntime) => {
     for (const [providerId, providerConfig] of Object.entries(providers)) {
       // First-party providers already ship correct metadata in the SDK.
       if (catalogue.providerIds.has(providerId)) continue;
-      const models = buildCatalogueWindowModels(providerConfig, catalogue.windows);
+      const models = buildCatalogueWindowModels(providerId, providerConfig, catalogue);
       if (models.length === 0) continue;
       modelRuntime.registerProvider(providerId, {
         models,
@@ -2500,7 +2593,7 @@ const applyCatalogueContextWindows = async (modelRuntime) => {
         refreshModels: async () => {
           try {
             const nextConfig = JSON.parse(readFileSync(configPath, "utf8"));
-            const nextModels = buildCatalogueWindowModels(nextConfig?.providers?.[providerId], catalogue.windows);
+            const nextModels = buildCatalogueWindowModels(providerId, nextConfig?.providers?.[providerId], catalogue);
             return nextModels.length > 0 ? nextModels : models;
           } catch {
             return models;
@@ -2901,16 +2994,19 @@ rl.on("line", (line) => {
 // 会一直常驻（Windows 不会随父进程回收），这里主动回收后退出。
 rl.on("close", () => {
   try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+  try { shellSessions.killAll(); } catch { /* ignore */ }
   process.exit(0);
 });
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  try { shellSessions.killAll(); } catch { /* ignore */ }
   process.exitCode = 1;
   setImmediate(() => process.exit(1));
 });
 process.on("unhandledRejection", (error) => {
   send({ type: "error", error: error?.message || String(error) });
+  try { shellSessions.killAll(); } catch { /* ignore */ }
   process.exitCode = 1;
   setImmediate(() => process.exit(1));
 });
@@ -2919,10 +3015,12 @@ process.on("unhandledRejection", (error) => {
 // abort 同步触发 taskkill / kill(-pid)，这里做最后一道回收。
 process.once("exit", () => {
   try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+  try { shellSessions.killAll(); } catch { /* ignore */ }
 });
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.once(signal, () => {
     try { activeHppSubagentExtension?.abortAll?.(); } catch { /* ignore */ }
+    try { shellSessions.killAll(); } catch { /* ignore */ }
     process.exit(0);
   });
 }

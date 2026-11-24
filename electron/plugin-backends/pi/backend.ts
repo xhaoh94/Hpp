@@ -4,6 +4,7 @@ import { join } from "path";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { buildDiffsFromToolEvent, isContextCompactionLike, normalizeQuestionProcessEvent, normalizeToolEvent, unwrapToolText, withoutToolDiffPayload } from "../../plugin-runtime/process-events";
 import { getPluginWorkerInvocation } from "../../plugin-runtime/plugin-worker-runtime";
+import { getBundledModelContextCatalogPath } from "../../agents/model-context-catalog";
 import { appendTimingLogLines, logTiming } from "../../utils/timing-log";
 import { ToolFileDiffFallback } from "../../plugin-runtime/turn-file-diff";
 import {
@@ -330,6 +331,7 @@ const buildPiSubagentEvent = (
     // 后台任务带稳定 id（sa_xxx），监视窗的停止/续聊都靠它；同步任务没有。
     const taskId = String(result.id || "").trim();
     const resultBackground = background || result.background === true;
+    const stopDetail = truncatePiSubagentText(String(result.errorMessage || ""))?.trim();
     return {
       id: taskId ? `${taskId}:${index + 1}` : `${toolCallId}:${index + 1}`,
       ...(taskId ? { taskId } : {}),
@@ -343,6 +345,8 @@ const buildPiSubagentEvent = (
       message: getPiSubagentResultText(result),
       prompt: task || undefined,
       ...(normalizeNativeSubagentStopReason(result.stopReason) ? { stopReason: normalizeNativeSubagentStopReason(result.stopReason) } : {}),
+      // 中断/失败的真实原因：界面上「已中断」悬停时给出，不然只能猜是谁停的。
+      ...(stopDetail ? { stopDetail } : {}),
       ...(usage ? { usage } : {}),
       // 监视窗/耗时展示用；老版本 worker 没有这些字段时不写，渲染层按缺省处理。
       ...(Number.isFinite(Number(result.startedAt)) ? { startedAt: Number(result.startedAt) } : {}),
@@ -513,6 +517,10 @@ export class PiSDKAgent {
     const workerEnv = {
       ...worker.env,
       PI_SDK_PACKAGE_ROOT: userRuntimeRoot,
+      // pi 内部自动压缩的分母要和 Hpp 的显示/阈值判定同源，否则同一个模型
+      // 会「界面一个上限、内部按另一个上限触发」。worker 优先读
+      // HPP_DATA_DIR 下的每日刷新缓存，读不到才回退这份内置快照。
+      HPP_MODEL_CONTEXT_CATALOG: getBundledModelContextCatalogPath(),
     };
     const child = spawn(worker.command, worker.args, {
       cwd: projectPath,
@@ -1401,7 +1409,7 @@ export class PiSDKAgent {
           if (message.thinking) this.emitEvent({ type: "thinking_end" });
           const stopReason = String(message.stopReason || "");
           const errorMessage = String(message.errorMessage || "").trim();
-          if (stopReason === "error" || errorMessage) {
+          if (stopReason !== "length" && (stopReason === "error" || errorMessage)) {
             this.pendingAssistantError = errorMessage || `Assistant stopped with reason: ${stopReason || "error"}`;
             this.pendingAssistantText = "";
             this.streamedText = false;
@@ -1411,7 +1419,10 @@ export class PiSDKAgent {
             this.clearTurnFallback();
             break;
           }
-          this.pendingAssistantError = "";
+          // 保留部分正文和用量；如果 SDK 自动续写成功，下一条正常消息会清除此错误。
+          this.pendingAssistantError = stopReason === "length"
+            ? "模型输出达到长度上限，本轮未完成。可以继续当前会话补齐剩余工作。"
+            : "";
           if (typeof message.text === "string" && message.text) {
             this.pendingAssistantText = message.text;
             this.pendingAssistantTextNeedsEmit = true;

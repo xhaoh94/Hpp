@@ -54,6 +54,8 @@ export interface AgentSubagent {
   message?: string;
   prompt?: string;
   stopReason?: ProcessSubagentStopReason;
+  /** 中断 / 失败的真实原因（后端 errorMessage），用于「已中断」的悬停说明。 */
+  stopDetail?: string;
   usage?: ProcessSubagentUsage;
   startedAt?: number;
   completedAt?: number;
@@ -111,6 +113,14 @@ export interface AgentProcess {
   startedAt: number;
   endedAt?: number;
   expanded?: boolean;
+  /**
+   * 这一回合自己的终态。
+   *
+   * 不能靠「有没有 interrupted 条目」反推：子 Agent 被单独停掉时它自己会留下
+   * interrupted，但主回合随后还在继续跑并正常收尾 —— 那属于子任务的结果，
+   * 不是整轮被中断。老数据没有这个字段，界面回退到按条目判定。
+   */
+  turnState?: AgentProcessFinalState;
   planSteps?: AgentProcessStep[];
   planStepsSource?: "native" | "inferred";
   changeSummary?: AgentProcessChangeSummary;
@@ -307,6 +317,7 @@ interface ChatState {
   contextUsageBySession: Record<string, SessionContextUsage>;
 
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
+  discardUnsentUserMessage: (sessionId: string, id: string) => void;
   updateLastAssistant: (content: string, sessionId?: string | null) => void;
   appendLastAssistantContent: (content: string, sessionId?: string | null) => void;
   setNativeTurnIdForTurn: (clientMessageId: string, nativeTurnId: string, sessionId?: string | null) => void;
@@ -717,6 +728,7 @@ export const normalizeAssistantProcessTerminalState = (
     process: {
       ...process,
       endedAt,
+      turnState: finalState,
       ...(options.expanded === undefined ? {} : { expanded: options.expanded }),
       entries: process.entries.map((entry) => {
         const hadStartedPhase = entry.phase === "started";
@@ -863,6 +875,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   addMessage: (msg, sessionId) =>
     set((s) => updateSessionMessages(s, sessionId, (messages) => [...messages, msg])),
+  discardUnsentUserMessage: (sessionId, id) =>
+    set((s) => updateSessionMessages(s, sessionId, (messages) => messages.filter((m) => m.role !== "user" || m.id !== id))),
 
   updateLastAssistant: (content, sessionId) =>
     set((s) => {

@@ -211,6 +211,74 @@ describe("agent event terminal reconciliation", () => {
     harness.controller.clearAllStreamWatchdogs();
   });
 
+  it("以模型目录的窗口为准，不受各插件自己上报的分母影响", () => {
+    const harness = createHarness();
+    // 模型目录（Hpp 统一目录）给的是 1M，后端照自己的口径只报 258k：
+    // 分母必须取目录值，否则同一个模型换个插件占用比例就变了。
+    useChatStore.getState().setCurrentModel({
+      id: "model-catalog",
+      name: "Model Catalog",
+      provider: "test",
+      reasoning: false,
+      contextWindow: 1048576,
+    });
+
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      inputTokens: 0,
+      outputTokens: 0,
+      contextTokens: 262144,
+      contextWindow: 258400,
+      contextPrecision: "official",
+    }, harness.controller);
+
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
+      contextWindow: 1048576,
+      usedTokens: 262144,
+      usageRatio: 0.25,
+    });
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
+  it("keeps the last reading when a usage event only carries the window", () => {
+    const harness = createHarness();
+    useChatStore.getState().setCurrentModel({
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+      contextWindow: 128000,
+    });
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      contextTokens: 82000,
+      contextWindow: 128000,
+      contextPrecision: "official",
+    }, harness.controller);
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
+      usedTokens: 82000,
+      updatedAt: expect.any(Number),
+    });
+    const updatedAt = useChatStore.getState().contextUsageBySession[SESSION_ID].updatedAt;
+
+    // 切模型 / 后端重建后常见「只有窗口、没有用量」的事件：
+    // 不能把上一次读数抹掉，否则界面上的上下文占用会凭空消失。
+    dispatchAgentEvent({
+      type: "token_usage",
+      sessionId: SESSION_ID,
+      contextWindow: 128000,
+    }, harness.controller);
+    expect(useChatStore.getState().contextUsageBySession[SESSION_ID]).toMatchObject({
+      contextWindow: 128000,
+      usedTokens: 82000,
+      usageRatio: 82000 / 128000,
+      updatedAt,
+    });
+    harness.controller.clearAllStreamWatchdogs();
+  });
+
   it("ignores the compaction request's own usage for the context ring", () => {
     const harness = createHarness();
     dispatchAgentEvent({ type: "context_compaction", id: "sum", phase: "started", sessionId: SESSION_ID }, harness.controller);

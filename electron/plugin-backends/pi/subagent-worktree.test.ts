@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // @ts-expect-error Hpp worker extension is intentionally shipped as ESM.
@@ -10,6 +10,8 @@ import {
   applySubagentWorktree,
   createSubagentWorktree,
   finalizeSubagentWorktree,
+  isStoredSubagentWorktree,
+  recoverSubagentWorktree,
 } from "./subagent-worktree.mjs";
 
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -63,6 +65,18 @@ describe("Pi 子 Agent worktree 隔离", () => {
     expect(await readFile(join(repo, "app.txt"), "utf8")).toContain("subagent change");
     expect(existsSync(finished.worktreePath)).toBe(false);
     expect(() => git(repo, ["show-ref", "--verify", `refs/heads/${finished.branch}`])).toThrow();
+  });
+
+  it("旧任务的 Git 基线已过期时保留现场，已保存基线的任务仍能恢复", async () => {
+    const taskId = "sa_recover";
+    const options = { projectCwd: repo, baseDir, taskId };
+    const info = { ...await createSubagentWorktree(options), id: taskId };
+    const draft = join(info.worktreePath, "draft.txt");
+    await writeFile(draft, "work in progress");
+    git(repo, ["reflog", "expire", "--expire=all", `refs/heads/${info.branch}`]);
+    await expect(recoverSubagentWorktree(options)).rejects.toThrow("无法确认隔离分支的原始基线");
+    expect(await readFile(draft, "utf8")).toBe("work in progress");
+    expect(await recoverSubagentWorktree({ ...options, stored: info })).toMatchObject(info);
   });
 
   it("未跟踪草稿文件不算子 Agent 的改动", async () => {
@@ -140,5 +154,87 @@ describe("Pi 子 Agent worktree 隔离", () => {
     await mkdir(plain, { recursive: true });
     await expect(createSubagentWorktree({ projectCwd: plain, baseDir, taskId: "w_x" }))
       .rejects.toThrow(/Git/);
+  });
+
+  /**
+   * 落盘的隔离记录来自上一次进程，恢复时不能无条件相信它：
+   * 记录被改坏（路径/分支/baseCommit 与约定不符）时必须拒绝 apply，
+   * 否则一次恢复就会在错误的仓库、错误的目录上执行 git。
+   */
+  describe("isStoredSubagentWorktree 校验落盘的隔离记录", () => {
+    let info: Record<string, any>;
+    let otherRepo: string;
+
+    beforeEach(async () => {
+      info = await createSubagentWorktree({ projectCwd: repo, baseDir, taskId: "w_check" });
+      info.id = "w_check";
+      otherRepo = join(root, "other");
+      await mkdir(otherRepo, { recursive: true });
+      git(otherRepo, ["init", "-q"]);
+      git(otherRepo, ["config", "user.email", "test@example.com"]);
+      git(otherRepo, ["config", "user.name", "Test"]);
+      await writeFile(join(otherRepo, "a.txt"), "a\n", "utf8");
+      git(otherRepo, ["add", "-A"]);
+      git(otherRepo, ["commit", "-q", "-m", "base"]);
+    });
+
+    it("接受本进程按约定创建的记录", () => {
+      expect(isStoredSubagentWorktree(info, baseDir, repo)).toBe(true);
+      // 分支名带冲突后缀也算合法（同名分支已存在时会加时间戳后缀）。
+      expect(isStoredSubagentWorktree({ ...info, branch: `${info.branch}-abc123` }, baseDir, repo)).toBe(true);
+    });
+
+    it("项目只是仓库的子目录时也接受", async () => {
+      const sub = join(repo, "packages", "app");
+      await mkdir(sub, { recursive: true });
+      await writeFile(join(sub, "index.ts"), "export {};\n", "utf8");
+      git(repo, ["add", "-A"]);
+      git(repo, ["commit", "-q", "-m", "sub"]);
+
+      const nested: Record<string, any> = await createSubagentWorktree({
+        projectCwd: sub,
+        baseDir,
+        taskId: "w_nested",
+      });
+      nested.id = "w_nested";
+      expect(nested.repoRoot).toBe(resolve(repo));
+      expect(nested.projectRelative).toBe(join("packages", "app"));
+      // rootPath 映射到 worktree 内的对应子目录，worktreePath 才是分支工作区根。
+      expect(nested.rootPath).toBe(join(nested.worktreePath, "packages", "app"));
+      expect(isStoredSubagentWorktree(nested, baseDir, sub)).toBe(true);
+      // 从仓库根开会话时 projectRoot 不同，不能认领这个子目录项目的记录。
+      expect(isStoredSubagentWorktree(nested, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree(nested, baseDir, nested.rootPath)).toBe(false);
+    });
+
+    it("拒绝与当前项目不匹配的记录", () => {
+      expect(isStoredSubagentWorktree(info, baseDir, otherRepo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, projectRoot: otherRepo }, baseDir, repo)).toBe(false);
+      // repoRoot 必须是当前项目的上级目录，不能指向别的仓库。
+      expect(isStoredSubagentWorktree({ ...info, repoRoot: otherRepo }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree(info, join(root, "other-base"), repo)).toBe(false);
+      expect(isStoredSubagentWorktree(info, "", repo)).toBe(false);
+      expect(isStoredSubagentWorktree(info, baseDir, "")).toBe(false);
+    });
+
+    it("拒绝被改过的路径、分支与 id", () => {
+      expect(isStoredSubagentWorktree({ ...info, worktreePath: join(root, "elsewhere") }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, worktreePath: join(info.worktreePath, "..", "..") }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, branch: "hpp-sub/w_other" }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, branch: "main" }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, id: "w_other" }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, id: "../w_check" }, baseDir, repo)).toBe(false);
+      // baseCommit 必须是完整的提交 id，否则可能拿任意引用当基线做 diff。
+      expect(isStoredSubagentWorktree({ ...info, baseCommit: "HEAD" }, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree({ ...info, baseCommit: "" }, baseDir, repo)).toBe(false);
+    });
+
+    it("缺字段或空记录一律拒绝", () => {
+      expect(isStoredSubagentWorktree(null, baseDir, repo)).toBe(false);
+      expect(isStoredSubagentWorktree(undefined, baseDir, repo)).toBe(false);
+      for (const key of ["repoRoot", "projectRoot", "worktreePath", "baseCommit", "branch"]) {
+        expect(isStoredSubagentWorktree({ ...info, [key]: undefined }, baseDir, repo)).toBe(false);
+      }
+    });
   });
 });

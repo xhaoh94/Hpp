@@ -52,6 +52,21 @@ describe("Codex lifecycle", () => {
     spawnMock.mockReset();
   });
 
+  it("只将原生 Compact 的插话拒收识别为可保留在队列的输入", async () => {
+    const child = new FakeCodexProcess();
+    respondToLifecycle(child, (c) => {
+      if (c.type === "guidance") child.stdout.write(JSON.stringify({ type: "error", id: c.id,
+        error: "failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact }" }) + "\n");
+    });
+    spawnMock.mockReturnValue(child);
+    const agent = new CodexAgent("session-1");
+    await agent.init("C:\\project");
+    await agent.sendMessage("处理任务");
+    await expect(agent.sendGuidance("继续")).rejects.toThrow("CODEX_COMPACTING");
+    expect(agent.isIdle()).toBe(false);
+    await agent.dispose();
+  });
+
   it("ignores output from a replaced Codex worker", () => {
     const events: AgentEvent[] = [];
     const agent = new CodexAgent("session-1", (event) => events.push(event as AgentEvent));
@@ -166,6 +181,25 @@ describe("Codex lifecycle", () => {
     expect(guidanceCommand?.id).toEqual(expect.any(String));
     child.stdout.write(`${JSON.stringify({ type: "guidance_delivered", id: guidanceCommand?.id })}\n`);
     expect(events.some((event) => event.type === "guidance_response_started")).toBe(true);
+    await agent.dispose();
+  });
+
+  it("独立压缩期间保持忙碌，并且不把输入或重复压缩写给 worker", async () => {
+    const child = new FakeCodexProcess();
+    const commands: Record<string, unknown>[] = [];
+    respondToLifecycle(child, (command) => commands.push(command));
+    spawnMock.mockReturnValue(child);
+    const agent = new CodexAgent("session-1");
+    await agent.init("C:\\project");
+    const pending = agent.compact();
+    expect(agent.isIdle()).toBe(false);
+    await expect(agent.sendMessage("继续")).rejects.toThrow("CODEX_COMPACTING");
+    await expect(agent.sendGuidance("继续")).rejects.toThrow("CODEX_COMPACTING");
+    await expect(agent.compact()).rejects.toThrow("SESSION_BUSY");
+    expect(commands.map((c) => c.type)).toEqual(["init", "compact"]);
+    child.stdout.write(JSON.stringify({ type: "compacted", id: commands[1].id }) + "\n");
+    await pending;
+    expect(agent.isIdle()).toBe(true);
     await agent.dispose();
   });
 

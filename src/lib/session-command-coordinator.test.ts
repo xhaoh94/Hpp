@@ -4,6 +4,7 @@ import { useProjectStore, type ProjectSession } from "@/stores/project-store";
 import { setAgentCatalog } from "@/lib/agents";
 import {
   getSessionThinking,
+  saveSessionContextUsage,
   saveSessionModel,
   saveSessionThinking,
 } from "@/hooks/useDataPersistence";
@@ -707,6 +708,30 @@ describe("SessionCommandCoordinator", () => {
     expect(useChatStore.getState().messageQueues["session-one"]).toEqual([
       expect.objectContaining({ id: "queued-failed-guidance", status: "failed", error: "GUIDANCE_FAILED" }),
     ]);
+  });
+
+  it("空闲检查后才开始压缩时，撤回乐观气泡，保留待发消息", async () => {
+    electronAPI.agentSendMessage.mockResolvedValueOnce({ success: false, error: "CODEX_COMPACTING" });
+    const input = { sessionId: "session-one", clientMessageId: "raced-compact", message };
+    expect(await SessionCommandCoordinator.sendMessage(input)).toMatchObject({ queued: true });
+    const chat = useChatStore.getState();
+    expect(chat.messageQueues[input.sessionId]).toEqual([expect.objectContaining({ id: input.clientMessageId, status: "queued" })]);
+    expect(chat.messages).toEqual([]);
+    expect(chat.sessionMessages[input.sessionId]).toEqual([]);
+    expect(await SessionCommandCoordinator.sendMessage(input)).toMatchObject({ queued: false });
+    expect(useChatStore.getState().messages.map((m) => m.id)).toEqual([input.clientMessageId]);
+  });
+
+  it("压缩拒收的插话保持普通排队，不生成幽灵确认或重复消息", async () => {
+    useProjectStore.setState({ agentStatuses: { "session-one": "running" } });
+    const item = { ...message, id: "during-compact", sessionId: "session-one", createdAt: 2, status: "queued" as const };
+    useChatStore.getState().enqueueMessage(item);
+    electronAPI.agentSendGuidance.mockResolvedValueOnce({ success: false, error: "CODEX_COMPACTING" });
+    await expect(SessionCommandCoordinator.guideQueuedMessage(item.sessionId, item.id)).resolves.toMatchObject({ queued: true });
+    confirmGuidanceResponse(item.sessionId);
+    vi.advanceTimersByTime(125_000);
+    expect(useChatStore.getState().messageQueues[item.sessionId]).toEqual([item]);
+    expect(electronAPI.agentSendMessage).not.toHaveBeenCalled();
   });
 
   it("keeps messages queued while the session is compacting", async () => {
@@ -2202,6 +2227,63 @@ describe("SessionCommandCoordinator", () => {
 
     expect(electronAPI.agentSetThinkingLevel).not.toHaveBeenCalled();
     expect(getSessionThinking("session-two")).toBe("high");
+  });
+
+  it("keeps the context usage reading when switching models and back", async () => {
+    const modelA = {
+      id: "model-a",
+      name: "Model A",
+      provider: "test",
+      reasoning: false,
+      contextWindow: 128000,
+    };
+    const modelB = {
+      id: "model-b",
+      name: "Model B",
+      provider: "test",
+      reasoning: false,
+      contextWindow: 200000,
+    };
+    saveSessionModel("session-one", modelA);
+    electronAPI.agentGetModels.mockResolvedValue([modelA, modelB]);
+    useChatStore.setState({
+      currentModel: modelA,
+      availableModels: [modelA, modelB],
+      contextUsageBySession: {
+        "session-one": {
+          contextWindow: 128000,
+          usedTokens: 64000,
+          remainingTokens: 64000,
+          usageRatio: 0.5,
+          source: "exact" as const,
+          model: { provider: "test", id: "model-a" },
+          updatedAt: 111,
+        },
+      },
+    });
+
+    await SessionCommandCoordinator.setModel("session-one", modelB, { models: [modelA, modelB] });
+    // 换模型只换窗口：读数属于会话，保留并按新窗口重算比例。
+    expect(useChatStore.getState().contextUsageBySession["session-one"]).toMatchObject({
+      contextWindow: 200000,
+      usedTokens: 64000,
+      usageRatio: 0.32,
+      model: { provider: "test", id: "model-b" },
+    });
+
+    // 切回来（中间没有产生任何请求）仍然看得到原来的占用数据。
+    await SessionCommandCoordinator.setModel("session-one", modelA, { models: [modelA, modelB] });
+    expect(useChatStore.getState().contextUsageBySession["session-one"]).toMatchObject({
+      contextWindow: 128000,
+      usedTokens: 64000,
+      remainingTokens: 64000,
+      usageRatio: 0.5,
+      model: { provider: "test", id: "model-a" },
+      updatedAt: 111,
+    });
+
+    saveSessionContextUsage("session-one", null);
+    useChatStore.setState({ contextUsageBySession: {} });
   });
 
   it("reconciles a persisted level after reloading model configuration", async () => {

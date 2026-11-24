@@ -22,6 +22,7 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
+let releaseCompact = null;
 const input = createInterface({ input: process.stdin });
 input.on("line", async (line) => {
   if (!line.trim()) return;
@@ -41,7 +42,24 @@ input.on("line", async (line) => {
     write({ id: "server-time", method: "currentTime/read", params: {} });
     return;
   }
+  if (message.method === "thread/compact/start") {
+    const threadId = message.params.threadId;
+    const mode = process.env.FAKE_CODEX_COMPACT;
+    write({ id: message.id, result: {} });
+    if (mode !== "legacy") {
+      write({ method: "turn/started", params: { threadId, turn: { id: "compact-turn" } } });
+    }
+    write({ method: "thread/compacted", params: { threadId, turnId: "compact-turn" } });
+    write({ method: "turn/completed", params: { threadId: "foreign", turn: { id: "compact-turn", status: "completed" } } });
+    if (mode !== "legacy") releaseCompact = () => write({ method: "turn/completed", params: {
+      threadId, turn: { id: "compact-turn", status: mode === "failure" ? "failed" : "completed", error: mode === "failure" ? "摘要生成失败" : null },
+    } });
+    await log({ marker: "compact-boundary" });
+    return;
+  }
   if (message.method === "model/list") {
+    releaseCompact?.();
+    releaseCompact = null;
     write({ id: message.id, result: { data: [
       { id: "model-default", displayName: "Default Model", isDefault: true, hidden: false, supportedReasoningEfforts: [
         { reasoningEffort: "low" },
@@ -477,6 +495,32 @@ describe("Codex worker protocol", () => {
         effort: level,
         collaborationMode: { settings: { reasoning_effort: level } },
       });
+  });
+
+  it.each(["modern", "failure", "legacy"])("等待所属压缩回合的终态后才接收下一条输入（%s）", async (mode) => {
+    const worker = startWorker(commandPath, tempRoot, logPath, { FAKE_CODEX_COMPACT: mode });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((m) => m.type === "ready");
+    worker.send({ id: "compress", type: "compact" });
+    await worker.waitFor((m) => m.type === "context_compaction" && m.phase === "started");
+    await expect.poll(() => readFile(logPath, "utf8")).toContain('"marker":"compact-boundary"');
+    if (mode !== "legacy") {
+      for (const type of ["prompt", "guidance", "compact"]) {
+        worker.send({ id: `busy-${type}`, type, message: "继续" });
+        expect(await worker.waitFor((m) => m.id === `busy-${type}`)).toMatchObject({ type: "error", error: type === "compact" ? "SESSION_BUSY" : "CODEX_COMPACTING" });
+      }
+      expect(await readFile(logPath, "utf8")).not.toMatch(/"method":"turn\/(?:start|steer)"/);
+      // 控制 RPC 作为测试屏障，通知模拟服务现在才结束真正的压缩回合。
+      worker.send({ id: "release", type: "getModels" });
+    }
+    const terminal = await worker.waitFor((m) => m.id === "compress");
+    expect(terminal.type).toBe(mode === "failure" ? "error" : "compacted");
+    expect(worker.messages.filter((m) => m.type === "context_compaction").map((m) => m.phase))
+      .toEqual(["started", mode === "failure" ? "failed" : "completed"]);
+    worker.send({ id: "after", type: "prompt", message: "继续" });
+    await worker.waitFor((m) => m.type === "prompt_done" && m.id === "after");
+    expect((await readFile(logPath, "utf8")).match(/"method":"turn\/start"/g)).toHaveLength(1);
   });
 
   it("returns an error for a UI response without a matching request", async () => {

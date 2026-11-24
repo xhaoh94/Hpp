@@ -109,6 +109,7 @@ const parseSubagent = (
     path,
     message: getFirstString(value, ["message", "detail", "summary"]),
     prompt: getFirstString(value, ["prompt", "task", "request"]),
+    stopDetail: getFirstString(value, ["stopDetail", "errorMessage", "error_message"]),
     ...(stopReason ? { stopReason } : {}),
     ...(usage ? { usage } : {}),
     ...(value.background === true ? { background: true } : {}),

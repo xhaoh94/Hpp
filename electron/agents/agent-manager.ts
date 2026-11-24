@@ -71,6 +71,7 @@ import {
   normalizeAgentSubagentConfig,
   type AgentSubagentConfig,
 } from "../../shared/agent-subagent";
+import { withCatalogContextWindows, resolveModelContextWindowFor } from "./model-context-catalog";
 import { builtinExtensionConfigFromIds } from "../../shared/agent-builtin-extensions";
 import { normalizeAgentPermissionMode } from "../../shared/agent-permissions";
 import type {
@@ -131,6 +132,14 @@ const PENDING_UI_STALE_MS = 60_000;
 const agentRegistry = getAgentPluginRegistry();
 
 async function mergeModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
+  const merged = await collectModelsWithConfiguredAgentModels(agentId, models);
+  // 上下文窗口统一由 models.dev 目录决定（见 model-context-catalog.ts）：
+  // 各插件自己的口径不同（codex 扣预留、claude 用有效上限、pi 用渠道声明），
+  // 同一个模型在不同插件里就会显示成不同的上限。目录没有的私有模型保留原值。
+  return withCatalogContextWindows(merged);
+}
+
+async function collectModelsWithConfiguredAgentModels(agentId: string | undefined, models: AgentModel[]): Promise<AgentModel[]> {
   if (!agentId) return models;
   const capabilities = await agentRegistry.getCapabilities(agentId);
   if (capabilities.configuration === "none") return models;
@@ -880,6 +889,10 @@ export class AgentManager {
         this.legacyCompactionThreshold,
       ),
     );
+    // 分母也走同一份目录：界面显示的「上下文上限」、阈值百分比、插件的自动
+    // 压缩触发点必须是同一个数。目录没收录的私有模型才退回插件上报的窗口。
+    const resolved = resolveModelContextWindowFor({ provider: model.provider, modelId: model.id });
+    if (resolved) this.compactionController.setSessionContextWindow(sessionId, resolved.window);
     // 首次收到模型时再把 settings 读进来；读到后会对已知会话重算一遍。
     void this.ensureCompactionThresholdLoaded();
   }

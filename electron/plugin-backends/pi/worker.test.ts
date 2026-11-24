@@ -310,6 +310,65 @@ class FakeSession {
       this.listener?.({ type: "agent_settled" });
       return;
     }
+    // 后台终端：真实 shell-sessions 会 fork 出 pty host，这里只验证 worker 侧的
+    // 「bash(background) 启动 + shell_session 读写/停止」链路。
+    if (message === "background-shell") {
+      const bashTool = this.registeredTools.find((candidate) => candidate.name === "bash");
+      const sessionTool = this.registeredTools.find((candidate) => candidate.name === "shell_session");
+      const toolContext = {
+        cwd: process.cwd(),
+        model: this.model,
+        thinkingLevel: this.thinkingLevel,
+        sessionManager: { getSessionId: () => "fake-session", getSessionFile: () => undefined },
+      };
+      let started;
+      let read;
+      let text = "";
+      let error;
+      try {
+        started = await bashTool.execute(
+          "bg-start",
+          { command: 'console.log("hpp-background-output")', description: "启动后台终端", background: true },
+          new AbortController().signal,
+          undefined,
+          toolContext,
+        );
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          read = await sessionTool.execute(
+            "bg-read",
+            { id: started.details.sessionId, action: "read", waitMs: 100 },
+            new AbortController().signal,
+            undefined,
+            toolContext,
+          );
+          text += read.content?.[0]?.text || "";
+          if (!read.details.running) break;
+        }
+      } catch (failure) {
+        error = failure?.message || String(failure);
+      }
+      this.listener?.({ type: "agent_start" });
+      this.listener?.({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error,
+              started: started?.details,
+              read: read?.details,
+              text,
+              toolNames: this.registeredTools.map((tool) => String(tool?.name || "")),
+            }),
+          }],
+          stopReason: "stop",
+        },
+      });
+      this.listener?.({ type: "agent_end" });
+      this.listener?.({ type: "agent_settled" });
+      return;
+    }
     if (message.startsWith("/skill:review") || message.startsWith("/scout-and-plan") || message.startsWith("/implement") || message.startsWith("/implement-and-review") || message.startsWith("/compact")) {
       this.listener?.({ type: "agent_start" });
       this.listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: message }], stopReason: "stop" } });
@@ -803,6 +862,31 @@ export const createBashToolDefinition = (_cwd, options = {}) => ({
   },
   commandPrefix: options.commandPrefix,
   rewrittenCommand: options.spawnHook?.({ command: "npm run build && npx tsc", cwd: _cwd, env: {} }).command,
+  // 真实 SDK 的 bash 定义会先拼 commandPrefix / 跑 spawnHook，再把命令交给
+  // operations.exec（或本地执行器）。后台终端靠 operations 覆盖拿到最终命令。
+  async execute(_toolCallId, input, signal, _onUpdate, ctx) {
+    const prefixed = options.commandPrefix
+      ? options.commandPrefix + "\\n" + input.command
+      : input.command;
+    const spawn = options.spawnHook
+      ? options.spawnHook({ command: prefixed, cwd: ctx?.cwd || _cwd, env: process.env })
+      : { command: prefixed, cwd: ctx?.cwd || _cwd, env: process.env };
+    const chunks = [];
+    let exitCode = 0;
+    if (options.operations?.exec) {
+      const result = await options.operations.exec(spawn.command, spawn.cwd, {
+        onData: (data) => chunks.push(String(data)),
+        signal,
+        timeout: input.timeout,
+        env: spawn.env,
+      });
+      exitCode = result.exitCode ?? 0;
+    }
+    const text = chunks.join("") || "(no output)";
+    return exitCode === 0
+      ? { content: [{ type: "text", text }] }
+      : { content: [{ type: "text", text }], isError: true };
+  },
 });
 export const getShellConfig = process.env.PI_TEST_BROKEN_SHELL === "1"
   ? () => ({ shell: "hpp-definitely-missing-shell", args: ["-c"] })
@@ -1932,6 +2016,18 @@ describe("Pi SDK worker protocol", () => {
     result = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
     expect(result).toMatchObject({ block: true });
     expect(result.reason).toContain("git reset --hard");
+
+    worker.send({
+      id: "plan-background",
+      type: "prompt",
+      message: `tool-call:${JSON.stringify({ toolName: "bash", input: { command: "npm run dev", background: true, description: "启动开发服务" } })}`,
+      permissionMode: "full-access",
+      planModeEnabled: true,
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "plan-background");
+    result = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("Plan 模式不能启动后台终端");
   });
 
   it("disables an unhealthy shell while preserving file discovery tools", async () => {
@@ -2025,6 +2121,88 @@ describe("Pi SDK worker protocol", () => {
     const message = worker.messages.filter((item) => item.type === "message_end").at(-1);
     const tools = JSON.parse(String((message?.message as { text?: unknown })?.text || "[]")) as string[];
     expect(tools).toContain("bash");
+  });
+
+  it("registers the background shell and shell_session tools", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, {
+      PI_TEST_SHELL_PATH: process.execPath,
+      PI_TEST_SHELL_ARGS: "[]",
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "tool", type: "prompt", message: "registered-shell-tool", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tool");
+    const tool = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "null"));
+    expect(tool.parameters.required).toEqual(expect.arrayContaining(["command", "description"]));
+    expect(tool.parameters.properties.background).toMatchObject({ type: "boolean" });
+    expect(String(tool.description)).toContain("注册的工具名称仍为 bash");
+    expect(String(tool.description)).toContain("background:true");
+
+    worker.send({ id: "tools", type: "prompt", message: "registered-tools", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "tools");
+    const names = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "[]")) as string[];
+    expect(names).toEqual(expect.arrayContaining(["bash", "shell_session"]));
+  });
+
+  it("starts a background terminal, reads its output and reports the exit code", async () => {
+    const worker = startWorker(runtimeRoot, agentDir, {
+      // 用 node 自身充当 shell，后台命令就是一个跨平台的短命进程。
+      PI_TEST_SHELL_PATH: process.execPath,
+      PI_TEST_SHELL_ARGS: JSON.stringify(["-e"]),
+    });
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+    worker.send({ id: "bg", type: "prompt", message: "background-shell", permissionMode: "full-access" });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "bg", 30000);
+    const payload = JSON.parse(String((worker.messages.filter((item) => item.type === "message_end").at(-1)?.message as { text?: unknown })?.text || "{}"));
+    expect(payload.error).toBeUndefined();
+    expect(payload.started?.sessionId).toBeTruthy();
+    expect(payload.read?.sessionId).toBe(payload.started.sessionId);
+    expect(payload.read?.running).toBe(false);
+    expect(payload.read?.exitCode).toBe(0);
+    expect(String(payload.text)).toContain("hpp-background-output");
+    // ConPTY 的鼠标/光标控制序列不能污染模型读到的输出。
+    expect(String(payload.text)).not.toContain("\u001b");
+    expect(payload.toolNames).toEqual(expect.arrayContaining(["bash", "shell_session"]));
+  }, 40000);
+
+  it("asks for permission before writing to a terminal but not before reading it", async () => {
+    const worker = startWorker(runtimeRoot, agentDir);
+    children.push(worker.child);
+    worker.send({ id: "init", type: "init", projectPath: tempRoot });
+    await worker.waitFor((message) => message.type === "ready");
+
+    worker.send({
+      id: "session-read",
+      type: "prompt",
+      message: `tool-call:${JSON.stringify({ toolName: "shell_session", input: { id: "terminal-1", action: "read" } })}`,
+      permissionMode: "ask",
+    });
+    await worker.waitFor((message) => message.type === "prompt_done" && message.id === "session-read");
+    expect(worker.messages).not.toContainEqual(expect.objectContaining({ type: "extension_ui_request" }));
+
+    worker.send({
+      id: "session-write",
+      type: "prompt",
+      message: `tool-call:${JSON.stringify({ toolName: "shell_session", input: { id: "terminal-1", action: "write", text: "rm -rf build\r" } })}`,
+      permissionMode: "ask",
+    });
+    const request = await worker.waitFor((message) => message.type === "extension_ui_request");
+    expect(request.request).toMatchObject({ method: "confirm", title: "Pi 请求权限" });
+    worker.send({
+      id: "deny-session-write",
+      type: "uiResponse",
+      response: { id: String((request.request as { id?: unknown }).id || ""), confirmed: false },
+    });
+    const blocked = await worker.waitFor((message) =>
+      message.type === "message_end"
+      && String((message.message as { text?: unknown })?.text || "").includes("block"));
+    expect(JSON.parse(String((blocked.message as { text?: unknown }).text))).toMatchObject({
+      block: true,
+      reason: "用户拒绝了该操作",
+    });
   });
 
   it("dismisses a pending questionnaire before waiting for abort", async () => {

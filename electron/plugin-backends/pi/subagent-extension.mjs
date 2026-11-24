@@ -1,14 +1,18 @@
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePiAgentDir } from "./pi-agent-dir.mjs";
 import { resolveSubagentCwd } from "./subagent-policy.mjs";
+import { createSubagentStorage } from "./subagent-storage.mjs";
 import {
   applySubagentWorktree,
   createSubagentWorktree,
   finalizeSubagentWorktree,
+  isStoredSubagentWorktree,
+  recoverSubagentWorktree,
   removeSubagentWorktree,
 } from "./subagent-worktree.mjs";
 
@@ -665,6 +669,7 @@ const runSingleAgent = async ({
   timeoutMs = DEFAULT_TASK_TIMEOUT_MS,
   // 续聊 / 后台任务用同一个会话文件重新拉起子进程；同步单次派发仍走 --no-session。
   sessionFile = "",
+  liveEntry,
 }) => {
   const result = {
     agent: agent.name,
@@ -723,6 +728,10 @@ const runSingleAgent = async ({
     if (immediate) emitUpdateNow();
     else emitProgressUpdate();
   };
+
+  // Pi 可以在同一子进程中消费引导并开始下一轮。完成标记只属于刚结束的助手消息。
+  let completedAnswer = false;
+  let inputQueued = false;
 
   if (!agent) return result;
   if (signal?.aborted) {
@@ -783,7 +792,9 @@ const runSingleAgent = async ({
   for (const extensionPath of approvedExtensionPaths) args.push("--extension", extensionPath);
   const model = agent.model || dispatchDefaults.model;
   if (model) args.push("--model", model);
-  if (!agent.model && dispatchDefaults.thinkingLevel) args.push("--thinking", dispatchDefaults.thinkingLevel);
+  if (model === dispatchDefaults.model && dispatchDefaults.thinkingLevel) {
+    args.push("--thinking", dispatchDefaults.thinkingLevel);
+  }
   const tools = getSubagentTools(agent, extensionIntegrations);
   if (tools.length > 0) args.push("--tools", tools.join(","));
   if (agent.systemPrompt) args.push("--append-system-prompt", truncateText(agent.systemPrompt, 24 * 1024));
@@ -797,6 +808,7 @@ const runSingleAgent = async ({
   let timedOut = false;
   let abortHandler;
   let timeoutId;
+  const steerRequests = new Map();
   try {
     const invocation = getPiInvocation(packageRoot, args, nodePath);
     child = spawn(invocation.command, invocation.args, {
@@ -816,6 +828,7 @@ const runSingleAgent = async ({
     });
 
     let rpcCompleted = false;
+    let settledAborted = false;
     let requestRpcExit = () => {};
     const writeRpc = (message) => {
       if (!interactive || !child?.stdin?.writable) return false;
@@ -876,14 +889,22 @@ const runSingleAgent = async ({
         setCurrentActivity("正在整理最终结果…");
         rpcCompleted = true;
         if (event.aborted === true) {
+          settledAborted = true;
           aborted = true;
-          result.stopReason = "aborted";
-          result.errorMessage = "子 Agent 已中断";
+          // 回答已经写完时，这次取消只打在收尾上：保留 completed。
+          if (!completedAnswer) {
+            result.stopReason = "aborted";
+            result.errorMessage = "子 Agent 已中断";
+          }
         }
         requestRpcExit();
         return;
       }
       if (interactive && event.type === "response") {
+        if (event.command === "steer" && steerRequests.has(event.id)) {
+          steerRequests.get(event.id)(event.success ? "" : (event.error || "子 Agent 拒绝了引导"));
+          return;
+        }
         if (event.command === "prompt") {
           if (event.success === false) {
             result.stopReason = "error";
@@ -900,8 +921,22 @@ const runSingleAgent = async ({
         }
         return;
       }
+      if (event.type === "queue_update") {
+        inputQueued = Boolean(event.steering?.length || event.followUp?.length);
+        if (inputQueued) completedAnswer = false;
+        return;
+      }
       if (event.type === "message_start") {
         const message = event.message;
+        if (message?.role === "user" || message?.role === "assistant") {
+          if (message.role === "user" || result.stopReason === "stop") {
+            result.output = "";
+            result.liveOutput = "";
+            result.messages.length = 0;
+          }
+          result.stopReason = undefined;
+          completedAnswer = false;
+        }
         if (message?.role === "assistant") setCurrentActivity("正在分析任务…");
         return;
       }
@@ -946,9 +981,11 @@ const runSingleAgent = async ({
         if (result.messages.length < MAX_MESSAGE_COUNT) result.messages.push(event.message);
         const message = event.message;
         if (message.role === "assistant") {
-          result.output = getMessageText(message) || result.output;
+          const text = getMessageText(message);
+          completedAnswer = message.stopReason === "stop" && Boolean(text.trim()) && !inputQueued;
+          result.output = text || result.output;
           result.liveOutput = "";
-          setCurrentActivity(getMessageText(message) ? "已完成一轮输出，继续工作…" : "正在继续分析…");
+          setCurrentActivity(text ? "已完成一轮输出，继续工作…" : "正在继续分析…");
           result.usage.turns += 1;
           const usage = isRecord(message.usage) ? message.usage : {};
           result.usage.input += Number(usage.input) || 0;
@@ -1059,6 +1096,20 @@ const runSingleAgent = async ({
       if (interactive && !writeRpc({ id: `prompt-${ownerId || Date.now()}`, type: "prompt", message: task })) {
         finish(1);
       }
+      if (interactive && liveEntry) {
+        liveEntry.steer = (message) => new Promise((resolve) => {
+          if (settled || rpcCompleted || aborted) { resolve("子任务正在收尾，请在结束后续聊。"); return; }
+          const id = randomUUID();
+          const finishSteer = (error) => {
+            clearTimeout(timer);
+            steerRequests.delete(id);
+            resolve(error);
+          };
+          const timer = setTimeout(() => finishSteer("未收到 Pi 的引导确认，请先查看任务状态。"), 10000);
+          steerRequests.set(id, finishSteer);
+          if (!writeRpc({ id, type: "steer", message })) finishSteer("子任务的输入通道已关闭。");
+        });
+      }
     });
 
     if (!skippingOversizedLine && stdoutBuffer.trim()) processLine(stdoutBuffer);
@@ -1068,9 +1119,18 @@ const runSingleAgent = async ({
       result.stopReason = "timeout";
       result.errorMessage = `子 Agent 超时（${Math.round(timeoutMs / 1000)} 秒）`;
     } else if (aborted || signal?.aborted) {
-      result.exitCode = 1;
-      result.stopReason = "aborted";
-      result.errorMessage = "子 Agent 已中断";
+      // 两条「不是真中断」的路径：子 Agent 已正常 settle（agent_settled 未取消），
+      // 或最后一轮回答已经写完。此时 abort 只是在杀进程收尾，结论就在 result.output
+      // 里；标成「已中断」会让用户对着完整结论看到红色中断标记。
+      const finishedBeforeAbort = (rpcCompleted && !settledAborted) || completedAnswer;
+      if (finishedBeforeAbort) {
+        result.exitCode = 0;
+      } else {
+        result.exitCode = 1;
+        result.stopReason = "aborted";
+        result.errorMessage = "子 Agent 已中断";
+        if (result.liveOutput) result.output = result.liveOutput;
+      }
     } else if (!result.stopReason && exitCode !== 0) {
       result.stopReason = "error";
       result.errorMessage = result.stderr || "子 Agent 进程异常退出";
@@ -1082,11 +1142,12 @@ const runSingleAgent = async ({
       result.protocolWarning = `已跳过 ${oversizedLineCount} 条超大协议记录`;
       result.stderr = truncateText(`${result.stderr}${result.stderr ? "\n" : ""}${result.protocolWarning}`, MAX_STDERR_BYTES);
     }
-    // "stop" 是正常结束，不是失败；只有这三种才算失败原因。
-    const stopReasonFailed = result.stopReason === "timeout"
-      || result.stopReason === "error"
-      || result.stopReason === "aborted";
-    result.currentActivity = stopReasonFailed
+    // SDK 可能在压缩后自行续写，只按最后一条助手消息的终态结算。
+    if (result.stopReason === "length") {
+      result.exitCode = 1;
+      result.errorMessage = "模型输出达到长度上限，本次子任务未完成。请根据已返回的内容继续。";
+    }
+    result.currentActivity = isFailedResult(result)
       ? result.errorMessage || (result.stopReason === "timeout" ? "已超时" : "已停止")
       : result.output ? "已完成" : "已完成（未返回正文）";
     emitUpdate();
@@ -1105,6 +1166,8 @@ const runSingleAgent = async ({
     emitUpdate();
     return finishResult();
   } finally {
+    if (liveEntry) liveEntry.steer = null;
+    for (const finish of steerRequests.values()) finish("子任务已经结束，引导未获确认。");
     dismissUI?.(ownerId, "child-exit");
     if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
   }
@@ -1345,6 +1408,7 @@ const builtinAgentRoster = DEFAULT_AGENTS
 const createSubagentRuntimeState = () => ({
   backgroundTasks: new Map(),
   isolatedTasks: new Map(),
+  applyingWorktrees: new Set(),
   isolatedTaskSeq: 0,
   backgroundTaskSeq: 0,
   activeTaskCount: 0,
@@ -1397,6 +1461,7 @@ export const createHppSubagentExtension = (options = {}) => {
     prepareHostTurn = () => {},
     /** worktree 隔离的根目录（<hpp-data>/worktrees）。 */
     worktreeBaseDir = "",
+    projectPath,
     /** P4：与 todo-extension 共享的任务 store。 */
     getTodoStore = () => null,
     /** P4：后台状态变更主动推给 UI（plan_update）。 */
@@ -1436,7 +1501,84 @@ export const createHppSubagentExtension = (options = {}) => {
   // 任务表、隔离任务、并发额度、唤醒队列都来自 extension 上的共享状态，
   // reload 后新实例仍能看到并管理旧任务。
   const { backgroundTasks, isolatedTasks, slotWaiters, pendingAutoWakeEntries } = state;
+  const storage = createSubagentStorage(subagentDataDir, sessionKey);
   const BACKGROUND_EVENT_THROTTLE_MS = 150;
+
+  const saveTask = (entry) => storage.saveTask(entry, entry.result ? toPublicResult(entry.result) : null);
+  const recordIsolation = (id, record, owner) => {
+    isolatedTasks.set(id, record);
+    storage.saveIsolation(id, record);
+    if (owner) {
+      owner.worktree = record.worktree;
+      saveTask(owner);
+    }
+  };
+  const rememberPendingWorktree = (entry, info) => {
+    recordIsolation(info.id, { id: info.id, status: "running", worktree: { ...info, pendingFinalization: true } }, entry);
+  };
+  const worktreeSummary = (info) => ({
+    id: info.id, branch: info.branch, path: info.worktreePath,
+    ...(info.pendingFinalization ? { pendingFinalization: true } : { changed: info.changed === true || !!info.error }),
+    ...(info.discarded ? { discarded: true } : {}),
+    ...(info.retained ? { retained: true, ignoredFiles: info.ignoredFiles } : {}),
+    ...(info.diffStat ? { diffStat: info.diffStat } : {}),
+    ...(info.applied ? { applied: true } : {}),
+    ...(info.error ? { error: `提交隔离工作区失败：${info.error}` } : {}),
+  });
+  const finishWorktree = async (worktree, result, item, owner, { keepChanges = false } = {}) => {
+    const discard = !keepChanges && (result?.stopReason === "aborted" || result?.stopReason === "interrupted");
+    let info;
+    try {
+      info = await finalizeSubagentWorktree(worktree, { taskId: worktree.id, discard });
+    } catch (error) {
+      info = { ...worktree, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (result) result.worktree = worktreeSummary(info);
+    recordIsolation(info.id, {
+      id: info.id, worktree: info, agent: item.agent, task: item.task,
+      status: info.error ? "error" : info.changed ? "completed" : "clean",
+    }, owner);
+    return info;
+  };
+  const getBackgroundTask = async (id, cwd) => {
+    const current = backgroundTasks.get(id);
+    if (current) {
+      await current.recoveringWorktree;
+      return current;
+    }
+    const stored = storage.loadTask(id);
+    if (!stored) return;
+    const interrupted = !isTerminalBackgroundStatus(stored.status);
+    const entry = {
+      ...stored, runKey: id, delivered: true, notified: true, continuable: stored.kind !== "chain",
+      status: interrupted ? "interrupted" : stored.status,
+      controller: new AbortController(), rounds: stored.rounds || [], usage: stored.usage || createUsage(),
+    };
+    if (interrupted) {
+      entry.completedAt = Date.now();
+      entry.result = { ...entry.result, exitCode: 1, stopReason: "aborted", errorMessage: "上一次执行进程已退出，可从已保存的会话继续。" };
+      saveTask(entry);
+    }
+    backgroundTasks.set(id, entry);
+    // 每个物理工作区的记录先于任务快照落盘。收尾或 apply 中途退出时以它为准。
+    const saved = storage.loadIsolation(entry.worktree?.id || id)?.worktree;
+    if (saved) entry.worktree = saved;
+    const currentProject = projectPath || cwd;
+    // 旧 worker 在续聊开始时也可能只留下上一轮已经清理的工作区记录。
+    const missingCheckout = !entry.worktree || (interrupted && (entry.worktree.applied
+      || (entry.worktree.changed === false && !entry.worktree.retained)));
+    if (entry.status === "interrupted" && missingCheckout && (entry.isolation === "worktree" || entry.kind === "chain")
+      && currentProject && entry.projectPath && !relative(entry.projectPath, currentProject)) {
+      // 兼容旧 worker：子进程可能已经写了文件，但任务快照里还只有 queued。
+      entry.recoveringWorktree = recoverSubagentWorktree({ projectCwd: currentProject, baseDir: worktreeBaseDir, taskId: id })
+        .then((info) => { if (info) rememberPendingWorktree(entry, info); })
+        .catch((error) => { entry.worktree = { error: error.message }; });
+      await entry.recoveringWorktree;
+      delete entry.recoveringWorktree;
+    }
+    if (entry.worktree && entry.result) entry.result.worktree = worktreeSummary(entry.worktree);
+    return entry;
+  };
 
   const nextBackgroundTaskId = () => {
     state.backgroundTaskSeq += 1;
@@ -1448,8 +1590,8 @@ export const createHppSubagentExtension = (options = {}) => {
   );
 
   const getSubagentTaskDir = () => {
-    if (!subagentDataDir) return "";
-    const dir = join(subagentDataDir, sanitizePathSegment(sessionKey));
+    const dir = storage.directory;
+    if (!dir) return "";
     mkdirSync(dir, { recursive: true });
     return dir;
   };
@@ -1936,6 +2078,7 @@ export const createHppSubagentExtension = (options = {}) => {
       }
     }
     writeBackgroundResultFile(entry);
+    saveTask(entry);
     emitBackgroundEntry(entry, true);
     notifyMainAgent(entry);
     pruneBackgroundTasks();
@@ -1945,7 +2088,7 @@ export const createHppSubagentExtension = (options = {}) => {
     ? "\n\n后台派发：background:true 会立即返回任务 id，子 Agent 在后台运行；结果完成时会通知你。"
     : "";
 
-  pi.registerTool({
+  const dispatchTool = {
     name: "subagent",
     label: "Subagent",
     description: `在隔离上下文中委派任务给专用 subagent。可用：${builtinAgentRoster}；也会读取 Pi 用户级和项目级 agent 配置。用户已安装的同名 Pi 扩展优先于此内置 fallback。\n\n${SUBAGENT_DISPATCH_POLICY}${poolHint}${backgroundHint}\n\n标题：每个任务都填 title，用 2~6 字的极简动宾短语概括它（如「补齐静态红点」「审查风险」「迁移红点C组」），只用于界面展示。\n\n超长结果：正文内联只给前面一段并标注「输出已截断」，同时附一行 [完整输出] 文件路径；需要全文时用 Read 读那个文件。`,
@@ -2041,7 +2184,7 @@ export const createHppSubagentExtension = (options = {}) => {
       additionalProperties: false,
     },
 
-    async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
+    async execute(_toolCallId, rawParams, signal, onUpdate, ctx, restoredEntry) {
       const params = isRecord(rawParams) ? rawParams : {};
       const agentScope = ["user", "project", "both"].includes(params.agentScope) ? params.agentScope : "user";
       const discovery = discoverAgents(ctx?.cwd || process.cwd(), agentDir, agentScope);
@@ -2356,11 +2499,21 @@ export const createHppSubagentExtension = (options = {}) => {
               return isolationErrorResult(item, step, agent, "当前会话尚未落盘或无法分叉，inheritContext 不可用；请去掉该参数后重试。");
             }
           }
+          const liveEntry = overrides.liveEntry;
+          const queued = liveEntry?.queuedGuidance?.splice(0) || [];
+          if (liveEntry) {
+            liveEntry.preparing = false;
+            if (worktree && ownsWorktree) rememberPendingWorktree(liveEntry, worktree);
+            if (inheritedSessionFile && !liveEntry.sessionFile) {
+              liveEntry.sessionFile = inheritedSessionFile;
+              saveTask(liveEntry);
+            }
+          }
           const result = await runSingleAgent({
             defaultCwd: runDefaultCwd,
             dispatchDefaults,
             agent: effectiveAgent,
-            task: item.task,
+            task: [item.task, ...queued].join("\n\n"),
             title: item.title,
             cwd: runCwd,
             step,
@@ -2372,7 +2525,8 @@ export const createHppSubagentExtension = (options = {}) => {
             hostSystemPrompt,
             nodePath,
             permissionMode: typeof getPermissionMode === "function" ? getPermissionMode() : "auto",
-            requestUI: ctx?.hasUI ? requestUI : undefined,
+            requestUI: ctx?.hasUI ? requestUI : (liveEntry && requestUI ? () => ({ cancelled: true }) : undefined),
+            liveEntry,
             dismissUI: ctx?.hasUI ? dismissUI : undefined,
             ownerId: `${_toolCallId}:${runKey}:${item.agent}`,
             bridgeExtensionPath,
@@ -2398,48 +2552,7 @@ export const createHppSubagentExtension = (options = {}) => {
           if (todoWarning) result.todoWarning = todoWarning;
           if (item.inheritContext && inheritedSessionFile) result.inheritedSessionFile = inheritedSessionFile;
           if (isolatedNote) result.isolatedNote = isolatedNote;
-          if (worktree && ownsWorktree) {
-            try {
-              // 被用户中断的任务不提交半成品：直接清掉隔离工作区。
-              const interrupted = result.stopReason === "aborted" || result.stopReason === "interrupted";
-              const info = await finalizeSubagentWorktree(worktree, { taskId: worktree.id, discard: interrupted });
-              result.worktree = {
-                id: worktree.id,
-                branch: info.branch,
-                path: info.worktreePath,
-                changed: info.changed === true,
-                ...(info.discarded ? { discarded: true } : {}),
-                ...(info.retained ? { retained: true, ignoredFiles: info.ignoredFiles } : {}),
-                ...(info.diffStat ? { diffStat: info.diffStat } : {}),
-              };
-              isolatedTasks.set(worktree.id, {
-                id: worktree.id,
-                worktree: info,
-                agent: item.agent,
-                task: item.task,
-                status: info.changed ? "completed" : "clean",
-              });
-              // 后台任务表也挂一份，续聊前据此判断隔离分支是否还没合并。
-              const ownerEntry = overrides.worktreeId ? backgroundTasks.get(overrides.worktreeId) : null;
-              if (ownerEntry) ownerEntry.worktree = info;
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              result.worktree = {
-                id: worktree.id,
-                branch: worktree.branch,
-                path: worktree.worktreePath,
-                changed: true,
-                error: `提交隔离工作区失败：${message}`,
-              };
-              isolatedTasks.set(worktree.id, {
-                id: worktree.id,
-                worktree,
-                agent: item.agent,
-                task: item.task,
-                status: "error",
-              });
-            }
-          }
+          if (worktree && ownsWorktree) await finishWorktree(worktree, result, item, overrides.liveEntry);
           return result;
         } finally {
           releaseTaskSlot();
@@ -2454,8 +2567,12 @@ export const createHppSubagentExtension = (options = {}) => {
           try { await removeSubagentWorktree(record.worktree); } catch { /* ignore */ }
         }
         isolatedTasks.delete(id);
+        storage.saveIsolation(id, null);
         for (const entry of backgroundTasks.values()) {
-          if (entry.worktree?.id === id) entry.worktree = null;
+          if (entry.worktree?.id === id) {
+            entry.worktree = null;
+            saveTask(entry);
+          }
         }
       };
 
@@ -2470,8 +2587,23 @@ export const createHppSubagentExtension = (options = {}) => {
         const budget = overrides.timeoutMs ?? item.timeoutMs ?? defaultTimeoutMs;
         // 0 = 不设超时；正数才建 deadline，排队与重试共享同一个截止时间。
         const deadline = budget > 0 ? Date.now() + budget : 0;
+        // 崩溃恢复的 checkout 里已有上一进程写入的文件。所有重试共用它，最后统一收尾。
+        let resumedWorktree;
+        const entry = overrides.liveEntry;
+        if (!overrides.worktreeInfo && entry?.worktree?.pendingFinalization) {
+          try {
+            resumedWorktree = await recoverSubagentWorktree({
+              projectCwd: ctx?.cwd || projectPath, baseDir: worktreeBaseDir, taskId: entry.id, stored: entry.worktree,
+            });
+            if (!resumedWorktree) throw new Error("找不到原隔离工作区。");
+          } catch (error) {
+            return isolationErrorResult(item, step, agentByName.get(item.agent) || { source: "unknown" },
+              `恢复隔离工作区失败：${error.message}`);
+          }
+        }
         const withDeadline = (extra) => ({
           ...overrides,
+          ...(resumedWorktree ? { worktreeInfo: resumedWorktree } : {}),
           ...(deadline > 0 ? { deadline } : {}),
           ...extra,
         });
@@ -2501,6 +2633,7 @@ export const createHppSubagentExtension = (options = {}) => {
           result = retried;
           attempt = next;
         }
+        if (resumedWorktree) await finishWorktree(resumedWorktree, result, item, entry, { keepChanges: true });
         return result;
       };
 
@@ -2522,6 +2655,7 @@ export const createHppSubagentExtension = (options = {}) => {
           agent: item.agent,
           agentPinnedModel: agentByName.get(item.agent)?.model,
           agentScope,
+          projectPath: ctx?.cwd,
           projectAgentsDir: discovery.projectAgentsDir,
           task,
           lastTask: task,
@@ -2557,8 +2691,12 @@ export const createHppSubagentExtension = (options = {}) => {
           eventTimer: null,
         };
         backgroundTasks.set(id, entry);
-        // 后台首轮与后续续聊共用同一个入口：runWithRetry 内部会走并发额度、
-        // 模型校验和重试。send 工具拿到的也是这个函数。
+        bindBackgroundRound(entry);
+        saveTask(entry);
+        return entry;
+      };
+
+      const bindBackgroundRound = (entry) => {
         entry.runRound = ({
           task = entry.task,
           model = entry.model,
@@ -2578,6 +2716,7 @@ export const createHppSubagentExtension = (options = {}) => {
             worktreeId: entry.id,
             taskId: entry.id,
             background: true,
+            liveEntry: entry,
             onQueued: () => {
               entry.status = "queued";
               entry.currentActivity = "排队中…";
@@ -2585,13 +2724,18 @@ export const createHppSubagentExtension = (options = {}) => {
             },
             onStarted: () => {
               entry.status = "running";
+              entry.preparing = true;
               entry.currentActivity = `正在启动 ${entry.agent}…`;
               scheduleBackgroundEvent(entry);
             },
           },
         );
-        return entry;
       };
+
+      if (restoredEntry) {
+        bindBackgroundRound(restoredEntry);
+        return;
+      }
 
       const launchBackgroundEntry = (entry) => {
         emitBackgroundEntry(entry, false);
@@ -2670,6 +2814,7 @@ export const createHppSubagentExtension = (options = {}) => {
                   taskId: entry.id,
                 });
                 chainWorktree.id = entry.id;
+                rememberPendingWorktree(entry, chainWorktree);
               } catch (error) {
                 return {
                   agent: "chain",
@@ -2696,6 +2841,8 @@ export const createHppSubagentExtension = (options = {}) => {
                   });
                 }, index, roundSignal, {
                   timeoutMs: entry.timeoutMs,
+                  liveEntry: entry,
+                  onStarted: () => { entry.status = "running"; entry.preparing = true; },
                   // 只有最后一环写入续聊会话，避免不同 agent 的上下文混在一起。
                   sessionFile: index === chain.length - 1 ? entry.sessionFile : "",
                   ...(chainWorktree ? { worktreeInfo: chainWorktree, worktreeId: entry.id } : {}),
@@ -2705,48 +2852,8 @@ export const createHppSubagentExtension = (options = {}) => {
               }
               return last;
             } finally {
-              if (chainWorktree) {
-                try {
-                  const interrupted = last?.stopReason === "aborted"
-                    || last?.stopReason === "interrupted"
-                    || entry.stopRequested === true;
-                  const info = await finalizeSubagentWorktree(chainWorktree, {
-                    taskId: entry.id,
-                    discard: interrupted,
-                  });
-                  entry.worktree = info;
-                  if (last) {
-                    last.worktree = {
-                      id: entry.id,
-                      branch: info.branch,
-                      path: info.worktreePath,
-                      changed: info.changed === true,
-                      ...(info.discarded ? { discarded: true } : {}),
-                      ...(info.retained ? { retained: true, ignoredFiles: info.ignoredFiles } : {}),
-                      ...(info.diffStat ? { diffStat: info.diffStat } : {}),
-                    };
-                  }
-                  isolatedTasks.set(entry.id, {
-                    id: entry.id,
-                    worktree: info,
-                    agent: "chain",
-                    task: entry.task,
-                    status: info.changed ? "completed" : "clean",
-                  });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  entry.worktree = { ...chainWorktree, error: message };
-                  if (last) {
-                    last.worktree = {
-                      id: entry.id,
-                      branch: chainWorktree.branch,
-                      path: chainWorktree.worktreePath,
-                      changed: true,
-                      error: `提交隔离工作区失败：${message}`,
-                    };
-                  }
-                }
-              }
+              // 链是否完成以最后一环的执行结果为准，停止请求可能只打在收尾阶段。
+              if (chainWorktree) await finishWorktree(chainWorktree, last, entry, entry);
             }
           };
           entries.push(entry);
@@ -2826,69 +2933,26 @@ export const createHppSubagentExtension = (options = {}) => {
               });
             }, index, signal, chainWorktree ? { worktreeInfo: chainWorktree, worktreeId: chainWorktree.id } : {});
             results.push(result);
-            if (isFailedResult(result)) {
-              // 失败步骤的内联预算只有 8KB，中间步骤的 output 在 details 里也被
-              // 截到 8KB：所有步骤都按 8KB 阈值落盘，保证任何一步的长输出
-              // 都有全文出口（以前只落失败那一步）。
-              results.forEach((entry) => persistLongResult(entry, MAX_TASK_OUTPUT_BYTES));
-              return {
-                content: [{ type: "text", text: `Chain 在第 ${index + 1} 步（${item.agent}）停止：${truncateText(getResultOutput(result), MAX_TASK_OUTPUT_BYTES)}${chainNote}${formatResultFiles(results)}` }],
-                details: details(results),
-                isError: true,
-              };
-            }
+            if (isFailedResult(result)) break;
             previous = getFinalOutput(result);
           }
-          const lastResult = results[results.length - 1];
-          // 最后一步的内联预算是 32KB；中间步骤只在 details 里（截到 8KB）。
-          // 按各自的预算落盘，任何一步的超长输出都能按路径读到全文。
-          results.forEach((entry, index) => persistLongResult(
-            entry,
-            index === results.length - 1 ? MAX_TOOL_OUTPUT_BYTES : MAX_TASK_OUTPUT_BYTES,
-          ));
-          return {
-            content: [{
-              type: "text",
-              text: truncateText(getFinalOutput(lastResult) || "无输出", MAX_TOOL_OUTPUT_BYTES)
-                + chainNote
-                + formatWorktreeNote(lastResult?.worktree)
-                + formatResultFiles(results),
-            }],
-            details: details(results),
-          };
         } finally {
           if (chainWorktree) {
-            try {
-              const info = await finalizeSubagentWorktree(chainWorktree, { taskId: chainWorktree.id });
-              const summary = {
-                id: chainWorktree.id,
-                branch: info.branch,
-                path: info.worktreePath,
-                changed: info.changed === true,
-                ...(info.diffStat ? { diffStat: info.diffStat } : {}),
-              };
-              if (results.length > 0) results[results.length - 1].worktree = summary;
-              isolatedTasks.set(chainWorktree.id, {
-                id: chainWorktree.id,
-                worktree: info,
-                agent: "chain",
-                task: chain.map((item) => item.task).join("\n→ "),
-                status: info.changed ? "completed" : "clean",
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              if (results.length > 0) {
-                results[results.length - 1].worktree = {
-                  id: chainWorktree.id,
-                  branch: chainWorktree.branch,
-                  path: chainWorktree.worktreePath,
-                  changed: true,
-                  error: `提交隔离工作区失败：${message}`,
-                };
-              }
-            }
+            await finishWorktree(chainWorktree, results.at(-1), { agent: "chain", task: chain.map((item) => item.task).join("\n→ ") });
           }
         }
+        const last = results.at(-1);
+        const failed = isFailedResult(last) || Boolean(last?.worktree?.error);
+        results.forEach((entry) => persistLongResult(entry,
+          entry === last && !failed ? MAX_TOOL_OUTPUT_BYTES : MAX_TASK_OUTPUT_BYTES));
+        const summary = failed
+          ? `Chain 在第 ${results.length} 步（${last.agent}）停止：${truncateText(getResultOutput(last), MAX_TASK_OUTPUT_BYTES)}`
+          : truncateText(getFinalOutput(last) || "无输出", MAX_TOOL_OUTPUT_BYTES);
+        return {
+          content: [{ type: "text", text: summary + chainNote + formatWorktreeNote(last.worktree) + formatResultFiles(results) }],
+          details: details(results),
+          ...(failed ? { isError: true } : {}),
+        };
       }
 
       if (tasks.length > 0) {
@@ -2973,7 +3037,8 @@ export const createHppSubagentExtension = (options = {}) => {
         details: details([result]),
       };
     },
-  });
+  };
+  pi.registerTool(dispatchTool);
 
   pi.registerTool({
     name: "subagent_apply",
@@ -2987,11 +3052,14 @@ export const createHppSubagentExtension = (options = {}) => {
       required: ["id"],
       additionalProperties: false,
     },
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = isRecord(rawParams) ? rawParams : {};
       const id = nonEmptyString(params.id) || "";
-      const isolated = isolatedTasks.get(id);
-      const entry = backgroundTasks.get(id);
+      const entry = await getBackgroundTask(id.replace(/-r\d+$/, ""), ctx?.cwd);
+      const savedId = entry?.worktree?.id;
+      const physicalId = entry?.id === id && typeof savedId === "string" && savedId.replace(/-r\d+$/, "") === id ? savedId : id;
+      const liveIsolation = isolatedTasks.get(physicalId);
+      const isolated = liveIsolation || storage.loadIsolation(physicalId);
       if (!isolated && !entry) {
         return {
           content: [{ type: "text", text: `未知的隔离任务：${id || "(空)"}` }],
@@ -2999,27 +3067,61 @@ export const createHppSubagentExtension = (options = {}) => {
           isError: true,
         };
       }
-      const info = isolated?.worktree || entry?.worktree;
+      let info = isolated?.worktree || (entry?.worktree?.id === physicalId ? entry.worktree : null);
       if (!info) {
+        if (entry?.worktree?.error) return { content: [{ type: "text", text: entry.worktree.error }], isError: true };
         return {
           content: [{ type: "text", text: `任务 ${id} 没有可用的隔离工作区（可能已应用或创建失败）。` }],
           details: { version: 1, worktree: entry?.result?.worktree || null },
           isError: true,
         };
       }
-      if (info.changed !== true) {
-        const ignoredFiles = Array.isArray(info.ignoredFiles) ? info.ignoredFiles : [];
+      if (info.id !== physicalId || (!liveIsolation && !isStoredSubagentWorktree(info, worktreeBaseDir, projectPath || ctx?.cwd))) {
+        return { content: [{ type: "text", text: "保存的隔离工作区与当前项目不匹配。" }], isError: true };
+      }
+      if (info.error) {
+        // 收尾失败的隔离工作区既不能合并（分支上可能没有子 Agent 的改动），
+        // 也不能当成「无改动」清掉。只能告知现场位置，交给用户/主 Agent 处理。
         return {
           content: [{
             type: "text",
-            text: ignoredFiles.length > 0
-              ? `任务 ${id} 只有被 .gitignore 忽略的产物（${ignoredFiles.slice(0, 8).join("、")}${ignoredFiles.length > 8 ? " 等" : ""}），未自动提交；工作区保留在 ${info.worktreePath}。`
-              : `任务 ${id} 没有产生文件改动，无需应用。`,
+            text: `任务 ${id} 的隔离工作区收尾失败：${info.error}\n工作区保留在 ${info.worktreePath || info.path || "(未知)"}${info.branch ? `（分支 ${info.branch}）` : ""}，未自动合并；请先手动检查或提交后再处理。`,
           }],
-          details: { version: 1, worktree: { id, changed: false, ...(ignoredFiles.length > 0 ? { retained: true, ignoredFiles } : {}) } },
+          details: { version: 1, worktree: { id, changed: true, applied: false, error: info.error } },
+          isError: true,
         };
       }
+      if (info.applied) {
+        return { content: [{ type: "text", text: `任务 ${id} 的改动已经合并。` }], details: { version: 1, worktree: { id, applied: true } } };
+      }
+      if (info.pendingFinalization && (!entry || !isTerminalBackgroundStatus(entry.status))) {
+        return { content: [{ type: "text", text: "隔离任务仍在运行，结束后可合并改动。" }], isError: true };
+      }
+      if (state.applyingWorktrees.has(info.branch)) {
+        return { content: [{ type: "text", text: "该隔离分支正在合并。" }], isError: true };
+      }
+      state.applyingWorktrees.add(info.branch);
       try {
+        if (info.pendingFinalization) {
+          const recovered = await recoverSubagentWorktree({
+            projectCwd: projectPath || ctx?.cwd, baseDir: worktreeBaseDir, taskId: entry.id, stored: info,
+          });
+          if (!recovered) throw new Error("找不到原隔离工作区。");
+          info = await finishWorktree(recovered, entry.result, entry, entry, { keepChanges: true });
+          if (info.error) throw new Error(`隔离工作区收尾失败：${info.error}，工作区保留在 ${info.worktreePath}`);
+        }
+        if (info.changed !== true) {
+          const ignoredFiles = Array.isArray(info.ignoredFiles) ? info.ignoredFiles : [];
+          return {
+            content: [{
+              type: "text",
+              text: ignoredFiles.length > 0
+                ? `任务 ${id} 只有被 .gitignore 忽略的产物（${ignoredFiles.slice(0, 8).join("、")}${ignoredFiles.length > 8 ? " 等" : ""}），未自动提交；工作区保留在 ${info.worktreePath}。`
+                : `任务 ${id} 没有产生文件改动，无需应用。`,
+            }],
+            details: { version: 1, worktree: { id, changed: false, ...(ignoredFiles.length > 0 ? { retained: true, ignoredFiles } : {}) } },
+          };
+        }
         const result = await applySubagentWorktree(info, { taskId: id });
         if (!result.applied) {
           return {
@@ -3051,9 +3153,13 @@ export const createHppSubagentExtension = (options = {}) => {
         }
         const cleanup = result.cleanup;
         const cleanupFailed = !!cleanup && (cleanup.removed === false || cleanup.branchDeleted === false);
-        isolatedTasks.delete(id);
-        if (entry?.result?.worktree) entry.result.worktree.applied = true;
-        if (entry?.worktree) entry.worktree.applied = true;
+        info.applied = true;
+        recordIsolation(info.id, { id: info.id, worktree: info, status: "applied" });
+        if (entry?.worktree?.id === info.id) {
+          entry.worktree = info;
+          if (entry.result) entry.result.worktree = worktreeSummary(info);
+          saveTask(entry);
+        }
         return {
           content: [{
             type: "text",
@@ -3077,6 +3183,8 @@ export const createHppSubagentExtension = (options = {}) => {
           details: { version: 1, worktree: { id, changed: true, applied: false } },
           isError: true,
         };
+      } finally {
+        state.applyingWorktrees.delete(info.branch);
       }
     },
   });
@@ -3106,12 +3214,13 @@ export const createHppSubagentExtension = (options = {}) => {
       },
       additionalProperties: false,
     },
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = isRecord(rawParams) ? rawParams : {};
       const requestedIds = Array.isArray(params.ids)
         ? params.ids.map((value) => String(value || "").trim()).filter(Boolean)
         : [];
-      const missing = requestedIds.filter((id) => !backgroundTasks.has(id));
+      const requestedTasks = await Promise.all(requestedIds.map((id) => getBackgroundTask(id, ctx?.cwd)));
+      const missing = requestedIds.filter((_, index) => !requestedTasks[index]);
       if (missing.length > 0) {
         return {
           content: [{ type: "text", text: `未知的后台任务：${missing.join("、")}` }],
@@ -3120,7 +3229,7 @@ export const createHppSubagentExtension = (options = {}) => {
         };
       }
       const targets = requestedIds.length > 0
-        ? requestedIds.map((id) => backgroundTasks.get(id))
+        ? requestedTasks
         : [...backgroundTasks.values()].filter((entry) => !isTerminalBackgroundStatus(entry.status));
       const timeoutRaw = Number(params.timeoutMs);
       const timeout = Number.isFinite(timeoutRaw) ? Math.min(600_000, Math.max(0, timeoutRaw)) : 30_000;
@@ -3158,10 +3267,10 @@ export const createHppSubagentExtension = (options = {}) => {
       required: ["id"],
       additionalProperties: false,
     },
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = isRecord(rawParams) ? rawParams : {};
       const id = nonEmptyString(params.id) || "";
-      const entry = backgroundTasks.get(id);
+      const entry = await getBackgroundTask(id, ctx?.cwd);
       if (!entry) {
         return {
           content: [{ type: "text", text: `未知的后台任务：${id || "(空)"}` }],
@@ -3194,7 +3303,7 @@ export const createHppSubagentExtension = (options = {}) => {
   pi.registerTool({
     name: "subagent_send",
     label: "Send to Subagent",
-    description: "对已经结束的后台子任务追加一轮对话（续聊）。默认沿用该任务上一轮实际使用的模型；只有明确传 model 才换。",
+    description: "向运行中的后台子任务发送纠偏指令；对已结束的任务，使用保存的会话继续一轮对话。",
     parameters: {
       type: "object",
       properties: {
@@ -3206,11 +3315,11 @@ export const createHppSubagentExtension = (options = {}) => {
       required: ["id", "message"],
       additionalProperties: false,
     },
-    async execute(_toolCallId, rawParams, signal) {
+    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
       const params = isRecord(rawParams) ? rawParams : {};
       const id = nonEmptyString(params.id) || "";
       const message = nonEmptyString(params.message) || "";
-      const entry = backgroundTasks.get(id);
+      const entry = await getBackgroundTask(id, ctx?.cwd);
       if (!entry) {
         return {
           content: [{ type: "text", text: `未知的后台任务：${id || "(空)"}` }],
@@ -3226,15 +3335,35 @@ export const createHppSubagentExtension = (options = {}) => {
         };
       }
       if (!isTerminalBackgroundStatus(entry.status)) {
+        let error;
+        if (entry.stopRequested || params.model) {
+          error = entry.stopRequested ? "该子任务正在停止。" : "运行中的子任务只能接收引导，换模型请在任务结束后续聊。";
+        } else if (entry.steer) {
+          error = await entry.steer(message);
+        } else if (entry.status === "queued" || entry.preparing) {
+          (entry.queuedGuidance ||= []).push(message);
+        } else {
+          error = "子任务的实时输入通道已关闭，请在结束后续聊。";
+        }
         return {
-          content: [{ type: "text", text: `任务 ${id} 仍在运行；先 subagent_wait 等它结束，或 subagent_stop 停止后再续聊。` }],
+          content: [{ type: "text", text: error || `任务 ${id} 已接收引导。` }],
           details: buildBackgroundDetails([entry]),
-          isError: true,
+          ...(error ? { isError: true } : {}),
         };
       }
       if (!entry.continuable) {
         return {
           content: [{ type: "text", text: `任务 ${id} 是 chain，不同环节使用不同 agent，暂不支持续聊；请重新派发一个任务。` }],
+          details: buildBackgroundDetails([entry]),
+          isError: true,
+        };
+      }
+      if (entry.worktree?.error) {
+        return {
+          content: [{
+            type: "text",
+            text: `任务 ${id} 的隔离工作区收尾失败（${entry.worktree.error}），工作区保留在 ${entry.worktree.worktreePath || entry.worktree.path || "(未知)"}。请先手动处理该工作区，再续聊；直接续聊会丢失这个未提交的现场。`,
+          }],
           details: buildBackgroundDetails([entry]),
           isError: true,
         };
@@ -3257,7 +3386,24 @@ export const createHppSubagentExtension = (options = {}) => {
         };
       }
 
+      if (!entry.runRound) {
+        const cwd = ctx?.cwd || projectPath;
+        if (!cwd || (entry.projectPath && relative(entry.projectPath, cwd))) {
+          return { content: [{ type: "text", text: "请在原项目会话中续聊该子任务。" }], isError: true };
+        }
+        const response = await dispatchTool.execute(_toolCallId, {
+          agent: entry.agent, task: message, agentScope: entry.agentScope,
+        }, signal, undefined, { ...ctx, cwd }, entry);
+        if (response?.isError) return response;
+        if (!isTerminalBackgroundStatus(entry.status)) {
+          return { content: [{ type: "text", text: "该子任务已在另一轮调用中恢复。" }], isError: true };
+        }
+      }
+
       const config = readSubagentConfig();
+      if (state.applyingWorktrees.has(entry.worktree?.branch)) {
+        return { content: [{ type: "text", text: "隔离工作区正在合并，完成后可续聊。" }], isError: true };
+      }
       const requestedModel = nonEmptyString(params.model);
       const poolActive = config.poolEnabled !== false;
       const pool = config.pool || [];
@@ -3326,10 +3472,12 @@ export const createHppSubagentExtension = (options = {}) => {
       entry.delivered = false;
       entry.notified = false;
       entry.completedAt = undefined;
+      entry.stopRequested = false;
       entry.liveOutput = "";
       entry.result = null;
       entry.liveUsage = null;
       entry.status = "queued";
+      saveTask(entry);
       const onUpdate = makeBackgroundUpdate(entry);
       // 同步续聊要同时响应两件事：宿主取消本次工具调用（signal），以及
 // 监视窗/工具对 subagent_stop（controller）。少任意一个都会出现
