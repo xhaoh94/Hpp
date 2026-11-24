@@ -15,19 +15,23 @@ import {
 } from "../../shared/session-export";
 import { queueNamedWrite } from "../utils/write-queue";
 
-const dataDir = join(app.getPath("userData"), "hpp-data");
+/**
+ * dev 模式会在 import 之后把 userData 换成 `<userData>/dev`（见 main.ts），
+ * 模块级常量会在那时固化成正式版目录，所以路径一律惰性求值。
+ */
+const getDataDir = () => join(app.getPath("userData"), "hpp-data");
 const ALLOWED_STORE_KEYS = new Set(["settings", "projects", "currentModel", "editor"]);
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
-const SESSION_MESSAGES_DB_PATH = join(dataDir, "session-messages.sqlite");
+const getSessionMessagesDbPath = () => join(getDataDir(), "session-messages.sqlite");
 /**
  * Pi 后台子 Agent 的会话/结果目录。文件名由 worker 按会话 id 派生目录，
  * 删除父会话时必须一并清掉，否则会一直堆在磁盘上。
  */
-const PI_SUBAGENT_DATA_DIR = join(process.env.HPP_DATA_DIR || dataDir, "pi-subagents");
+const getPiSubagentDataDir = () => join(process.env.HPP_DATA_DIR || getDataDir(), "pi-subagents");
 const sanitizeSubagentDirName = (value: string) =>
   String(value || "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "default";
 /** 旧版把全部会话消息放在这一个 JSON 里，SQLite 上线后只用于一次性导入。 */
-const LEGACY_SESSION_MESSAGES_JSON_PATH = join(dataDir, "sessionMessages.json");
+const getLegacySessionMessagesJsonPath = () => join(getDataDir(), "sessionMessages.json");
 /** freelist 占比达到该值且空闲页够多时才做 VACUUM（它会阻塞主进程并需要约两倍临时空间）。 */
 const VACUUM_MIN_FREE_PAGES = 64;
 const VACUUM_FREE_PAGE_RATIO = 0.2;
@@ -46,7 +50,7 @@ function getStoreFilePath(key: unknown): string {
   if (typeof key !== "string" || !ALLOWED_STORE_KEYS.has(key)) {
     throw new Error("Invalid data store key.");
   }
-  return join(dataDir, `${key}.json`);
+  return join(getDataDir(), `${key}.json`);
 }
 
 function normalizeSessionId(value: unknown): string {
@@ -58,8 +62,8 @@ function normalizeSessionId(value: unknown): string {
 
 function getSessionMessagesDb(): DatabaseSync {
   if (sessionMessagesDb) return sessionMessagesDb;
-  mkdirSync(dataDir, { recursive: true });
-  const db = new DatabaseSync(SESSION_MESSAGES_DB_PATH);
+  mkdirSync(getDataDir(), { recursive: true });
+  const db = new DatabaseSync(getSessionMessagesDbPath());
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -94,7 +98,7 @@ function isImportableLegacyMessage(value: unknown): value is { id: string } {
 function archiveLegacySessionMessagesJson(): void {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const suffix of ["", ".bak"]) {
-    const source = `${LEGACY_SESSION_MESSAGES_JSON_PATH}${suffix}`;
+    const source = `${getLegacySessionMessagesJsonPath()}${suffix}`;
     try {
       renameSync(source, `${source}.imported-${stamp}`);
     } catch {
@@ -111,7 +115,7 @@ function archiveLegacySessionMessagesJson(): void {
 function importLegacySessionMessages(db: DatabaseSync): void {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(LEGACY_SESSION_MESSAGES_JSON_PATH, "utf-8"));
+    parsed = JSON.parse(readFileSync(getLegacySessionMessagesJsonPath(), "utf-8"));
   } catch {
     return;
   }
@@ -492,7 +496,7 @@ function deleteSessionMessageRows(
 
 async function ensureDataDir() {
   try {
-    await mkdir(dataDir, { recursive: true });
+    await mkdir(getDataDir(), { recursive: true });
   } catch {
     // Already exists
   }
@@ -658,7 +662,7 @@ async function purgePiSubagentDirs(
   if (validSessionIds) {
     const valid = new Set([...validSessionIds].map(sanitizeSubagentDirName));
     try {
-      for (const entry of await readdir(PI_SUBAGENT_DATA_DIR, { withFileTypes: true })) {
+      for (const entry of await readdir(getPiSubagentDataDir(), { withFileTypes: true })) {
         if (!entry.isDirectory() || valid.has(entry.name)) continue;
         targets.add(entry.name);
       }
@@ -667,7 +671,7 @@ async function purgePiSubagentDirs(
     }
   }
   await Promise.all([...targets].map((name) => (
-    rm(join(PI_SUBAGENT_DATA_DIR, name), { recursive: true, force: true }).catch(() => undefined)
+    rm(join(getPiSubagentDataDir(), name), { recursive: true, force: true }).catch(() => undefined)
   )));
 }
 

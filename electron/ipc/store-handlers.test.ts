@@ -26,7 +26,7 @@ describe("store handlers", () => {
     tempRoot = await mkdtemp(join(tmpdir(), "hpp-store-"));
     electronState.userDataDir = tempRoot;
     electronState.handlers.clear();
-    // 模块级常量会优先读 HPP_DATA_DIR（生产由 main.ts 设置）。开发机上这个
+    // pi-subagents 目录优先读 HPP_DATA_DIR（生产由 main.ts 设置）。开发机上这个
     // 环境变量常已存在，不覆盖的话 pi-subagents 目录会指向真实用户目录，
     // 清理类断言就会在临时目录里查一个永远不会被删的目录。
     process.env.HPP_DATA_DIR = join(tempRoot, "hpp-data");

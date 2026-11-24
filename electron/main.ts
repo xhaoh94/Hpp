@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, nativeTheme, Notification, session, shell, Tray } from "electron";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { execFile } from "child_process";
@@ -25,6 +25,7 @@ import {
 } from "./app-update-polling";
 import { AppShutdownCoordinator } from "./app-shutdown";
 import { detectDesktopEnvironment, getLinuxChromiumSwitches } from "./linux-desktop";
+import { resolveDevDataDir, ensureSharedDataDirLink, resolveDevUserDataDir, resolvePackagedDataDir } from "./utils/user-data-dir";
 import { getDefaultCloseToTray, resolveCloseToTraySetting } from "../shared/desktop-platform";
 import { createLocalMediaServer, type LocalMediaServer } from "./local-media-server";
 import {
@@ -60,9 +61,41 @@ for (const chromiumSwitch of getLinuxChromiumSwitches(process.platform, process.
 // Set app name
 app.setName("hpp");
 
-// 安装版里没有 dev 脚本注入的 HPP_DATA_DIR，而插件宿主、性能日志都要靠它
+// dev 和正式版默认共用同一个 userData（%APPDATA%/hpp），而单实例锁与 Chromium
+// profile 都绑在 userData 上：正式版开着时启动 dev 会被当成第二个实例直接退出，
+// 「正式版里改完代码再起 dev 验收」就永远起不来。dev 换到 <userData>/dev，锁和
+// profile 独立，两边可以并存且各自仍然只允许一个实例；hpp-data 另用目录链接
+// 指回正式版那份，dev 里直接能用同一套项目 / settings / Pi SDK runtime。
+// 必须在任何 app.getPath("userData")（下面 HPP_DATA_DIR 的 fallback）和
+// requestSingleInstanceLock() 之前完成。
+if (is.dev) {
+  const packagedUserData = app.getPath("userData");
+  const devUserData = resolveDevUserDataDir(packagedUserData, process.env.HPP_DEV_USER_DATA);
+  // setPath 要求目录已存在，否则抛错。
+  mkdirSync(devUserData, { recursive: true });
+  app.setPath("userData", devUserData);
+  // userData 改了 Chromium 的 profile 不改就还会跟正式版抢同一份 LevelDB。
+  app.setPath("sessionData", devUserData);
+  // HPP_DEV_ISOLATED_DATA=1 时完全隔离数据（要自己重装 SDK / 重配 provider）。
+  if (!String(process.env.HPP_DEV_ISOLATED_DATA || "").trim()) {
+    const linkResult = ensureSharedDataDirLink(
+      resolvePackagedDataDir(packagedUserData),
+      resolveDevDataDir(devUserData),
+    );
+    if (linkResult === "failed") {
+      console.warn(
+        "[Hpp] dev hpp-data 链接失败，dev 将使用独立数据目录:",
+        resolveDevDataDir(devUserData),
+      );
+    }
+  }
+  console.log("[Hpp] dev userData:", devUserData, "| hpp-data:", resolveDevDataDir(devUserData));
+}
+
+// 正式版和 dev 都没有外部注入 HPP_DATA_DIR，而插件宿主、性能日志都要靠它
 // 定位 hpp-data。这里补上同一份 fallback（与 agent-manager / agent-config
-// 一致），避免同一个目录在不同进程里解析成两个位置。
+// 一致），避免同一个目录在不同进程里解析成两个位置。dev 下 userData 已经换
+// 成 <userData>/dev，这里自然指向 dev 的 hpp-data（链接到正式版那份）。
 if (!String(process.env.HPP_DATA_DIR || "").trim()) {
   process.env.HPP_DATA_DIR = join(app.getPath("userData"), "hpp-data");
 }
