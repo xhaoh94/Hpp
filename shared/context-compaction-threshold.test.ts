@@ -19,14 +19,14 @@ describe("normalizeContextCompactionThreshold", () => {
     expect(normalizeContextCompactionThreshold(100)).toBe(100);
   });
 
-  it("rounds and still accepts the legacy {percent} shape", () => {
+  it("rounds numeric values", () => {
     expect(normalizeContextCompactionThreshold(72.6)).toBe(73);
-    expect(normalizeContextCompactionThreshold({ percent: 60 })).toBe(60);
   });
 
   it("falls back to the default for junk", () => {
     expect(normalizeContextCompactionThreshold(undefined)).toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
     expect(normalizeContextCompactionThreshold("80")).toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
+    expect(normalizeContextCompactionThreshold({ percent: 60 })).toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
     expect(normalizeContextCompactionThreshold(Number.NaN)).toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
   });
 });
@@ -53,13 +53,13 @@ describe("per model threshold map", () => {
     expect(map).toEqual({ "relay:gpt-5.1": 73, "relay:claude": CONTEXT_THRESHOLD_MIN });
   });
 
-  it("resolves the model entry first, then the legacy global value", () => {
+  it("resolves only the model entry, otherwise the default", () => {
     const thresholds = { "relay:gpt-5.1": 60 };
     expect(resolveContextCompactionThreshold(thresholds, { provider: "relay", id: "gpt-5.1" })).toBe(60);
-    // 没配置过的模型退回旧版全局值，升级后行为保持连续。
-    expect(resolveContextCompactionThreshold(thresholds, { provider: "relay", id: "other" }, 90)).toBe(90);
+    // 没配置过的模型直接回默认 100%，不再读取任何全局兜底值。
     expect(resolveContextCompactionThreshold(thresholds, { provider: "relay", id: "other" }))
       .toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
+    expect(resolveContextCompactionThreshold(thresholds, null)).toBe(DEFAULT_CONTEXT_COMPACTION_THRESHOLD);
   });
 });
 

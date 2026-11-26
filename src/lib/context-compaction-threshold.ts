@@ -10,15 +10,9 @@ import {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
-/** 旧版全局字段，只用于升级兼容读取；新写入一律落到按模型映射里。 */
-const LEGACY_SETTINGS_KEY = "contextCompactionThreshold";
-/** 更早的多档位字段，同样只用于兼容读取。 */
-const LEGACY_TIERS_KEY = "contextCompactionTiers";
-
 /**
  * 读某个模型的阈值。
- * 模型没有单独配置时退回旧版全局值，再退回默认值 —— 升级后行为保持连续，
- * 但任何一次拖动都只会写入当前模型这一条，不再影响其它模型。
+ * 只认「渠道 + 模型」这一条；没有单独配置就是默认 100%（不自动压缩）。
  */
 export async function loadContextCompactionThreshold(
   model?: ContextCompactionThresholdModel | null,
@@ -30,14 +24,6 @@ export async function loadContextCompactionThreshold(
     const thresholds = normalizeContextCompactionThresholdMap(general[CONTEXT_COMPACTION_THRESHOLDS_KEY]);
     const key = contextCompactionThresholdKey(model);
     if (key && thresholds[key] !== undefined) return thresholds[key];
-
-    if (general[LEGACY_SETTINGS_KEY] !== undefined) {
-      return normalizeContextCompactionThreshold(general[LEGACY_SETTINGS_KEY]);
-    }
-    const legacy = general[LEGACY_TIERS_KEY];
-    if (Array.isArray(legacy) && legacy.length > 0) {
-      return normalizeContextCompactionThreshold(legacy[0]);
-    }
     return DEFAULT_CONTEXT_COMPACTION_THRESHOLD;
   } catch {
     return DEFAULT_CONTEXT_COMPACTION_THRESHOLD;

@@ -185,6 +185,65 @@ export interface AgentProviderConfiguration {
 
 export type AgentConfigurationSupport = AgentProviderConfiguration | "none";
 
+/** 渠道登录（账号 OAuth）的返回结果；provider 是登录后可以落成渠道的候选值。 */
+export interface AgentCreditCheckinResult {
+  agentId: string;
+  providerId: string;
+  displayName?: string;
+  /** signed=领到了，already=今天已领过 */
+  state?: string;
+  credit?: number;
+  error?: string;
+}
+
+export interface AgentCreditCheckinSettings {
+  enabled: boolean;
+  /** 24 小时制 HH:MM（当地时间）。 */
+  time: string;
+  /** 最近一次自动执行的日期 YYYY-MM-DD。 */
+  lastRunDate?: string;
+  lastResults?: AgentCreditCheckinResult[];
+}
+
+export interface AgentCreditClaimResult {
+  success: boolean;
+  /** signed=这次领到了，already=今天已领过，failed=失败 */
+  state?: "signed" | "already" | "failed";
+  /** 本次领到的积分 */
+  credit?: number;
+  message?: string;
+  error?: string;
+  uid?: string;
+  nickname?: string;
+}
+
+export interface AgentProviderLoginResult {
+  success: boolean;
+  error?: string;
+  /** 给用户的提示，例如“已在终端打开 CodeBuddy，请输入 /login”。 */
+  hint?: string;
+  provider?: {
+    providerId: string;
+    displayName?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    authMode?: AgentProviderAuthMode;
+    endpoint?: string;
+    /** 账号对应的默认模型列表（CodeBuddy 端点不支持 OpenAI 兼容拉取）。 */
+    models?: Array<{
+      id: string;
+      name?: string;
+      reasoning?: boolean;
+      imageInput?: boolean;
+      contextWindow?: number;
+      /** 模型能力来自 Agent / CLI 目录时标记为内置，配置弹窗不再提供手改控件。 */
+      isBuiltin?: boolean;
+      hasThinkingLevels?: boolean;
+      supportedThinkingLevels?: string[];
+    }>;
+  };
+}
+
 export interface AgentCompactionCapabilities {
   thinkingLevel: boolean;
   /** 插件支持「启用/关闭上下文压缩」开关（后端能真正取消压缩）。 */
@@ -300,6 +359,10 @@ export interface AgentCapabilities {
   actions: boolean;
   configuration: AgentConfigurationSupport;
   providerActivation: AgentProviderActivationSupport;
+  /** 插件支持在渠道弹窗里发起账号登录（configProvider.login）。 */
+  providerLogin?: boolean;
+  /** 支持每日签到领积分（configProvider.claimDailyCredit）。 */
+  providerCheckin?: boolean;
   compaction?: AgentCompactionSupport;
   subagent?: AgentSubagentSupport;
   builtinExtensions?: AgentBuiltinExtensionSupport;

@@ -167,11 +167,26 @@ describe("mobile capability source constraints", () => {
     expect(stylesSource).toContain(".toolbar-title-row strong { max-width: 16em; }");
   });
 
-  it("shows permission modes before the model picker when the Agent supports them", () => {
-    expect(appSource).toContain("selectedAgent?.supportsPermissions === true");
-    expect(appSource).toContain("<MobilePermissionPicker");
-    expect(appSource).toContain('"settings.setPermissionMode"');
-    expect(appSource.indexOf("<MobilePermissionPicker")).toBeLessThan(appSource.indexOf("<MobileModelPicker"));
+  it("keeps permission in the toolbar and moves plan into the add menu", () => {
+    // 权限留在常驻工具条（和桌面端一致）；计划模式收进加号菜单。
+    const toolbar = appSource.slice(
+      appSource.indexOf('className="composer-settings"'),
+      appSource.indexOf("<MobileThinkingPicker"),
+    );
+    // 权限在模型选择器前面，思考在模型之后。
+    expect(toolbar).toContain("<MobilePermissionPicker");
+    expect(toolbar.indexOf("<MobilePermissionPicker")).toBeLessThan(toolbar.indexOf("<MobileModelPicker"));
+    expect(appSource).not.toContain("className={`plan-toggle ");
+    expect(appSource).toContain('"settings.setPlanMode"');
+  });
+
+  it("shows provider names in the model picker and lets the menu size to content", () => {
+    // 一级标题显示渠道名，旧版宿主不下发映射时回退 id。
+    expect(appSource).toContain("{providerNames[provider] || provider}");
+    expect(appSource).toContain("providerNames={selectedConfig?.providerNames || EMPTY_PROVIDER_NAMES}");
+    // 定宽 190px 会把模型名截断：改成跟着内容走，并在视口内收敛。
+    expect(stylesSource).toContain("width: max-content;");
+    expect(stylesSource).toContain("max-width: min(320px, calc(100vw - 24px));");
   });
 
   it("matches the desktop permission menu colors", () => {

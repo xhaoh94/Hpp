@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 3,
+  "id": "codebuddy",
+  "name": "CodeBuddy",
+  "version": "1.0.15",
+  "minHppVersion": "0.1.0",
+  "description": "Tencent CodeBuddy / WorkBuddy CLI programming agent",
+  "entry": "agent.mjs",
+  "runtime": "cli",
+  "command": "codebuddy",
+  "packageName": "@tencent-ai/codebuddy-code",
+  "order": 40,
+  "installHint": "运行 npm install -g @tencent-ai/codebuddy-code，或使用 WorkBuddy 桌面端自带的内嵌 CLI；也可以在 Hpp 里用「登录账号」完成授权。",
+  "updateCommand": "npm install -g @tencent-ai/codebuddy-code@latest",
+  "shortName": "CB",
+  "capabilities": {
+    "planMode": "prompt",
+    "permissions": true,
+    "guidance": false,
+    "fork": false,
+    "actions": true,
+    "providerLogin": true,
+    "configuration": {
+      "type": "provider",
+      "storage": "hpp",
+      "endpoints": [
+        {
+          "id": "codebuddy",
+          "label": "CodeBuddy / WorkBuddy 官方端点"
+        }
+      ],
+      "defaultEndpoint": "codebuddy",
+      "authModes": [
+        {
+          "id": "bearer",
+          "label": "Bearer Token"
+        }
+      ],
+      "defaultAuthMode": "bearer",
+      "pathLabel": "%LOCALAPPDATA%/CodeBuddyExtension",
+      "hint": "一条渠道对应一个 CodeBuddy / WorkBuddy 账号：切换渠道即切换账号，请求由 CLI 自己的登录态发出。",
+      "modelDefaults": {
+        "reasoning": true,
+        "imageInput": true
+      },
+      "supportedThinkingLevels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "fixedModelCapabilities": false,
+      "modelListMode": "configured"
+    },
+    "providerActivation": "single-active",
+    "providerCheckin": true
+  }
+}

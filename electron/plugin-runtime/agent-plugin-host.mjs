@@ -217,6 +217,8 @@ const methods = {
       writeProviderConfig: typeof pluginModule.configProvider?.write === "function",
       activateProvider: typeof pluginModule.configProvider?.activateProvider === "function",
       lookupModel: typeof pluginModule.configProvider?.lookupModel === "function",
+      loginProvider: typeof pluginModule.configProvider?.login === "function",
+      claimDailyCredit: typeof pluginModule.configProvider?.claimDailyCredit === "function",
     };
   },
   async getStatus() { return pluginModule.getStatus?.(createStatusContext()); },
@@ -229,6 +231,9 @@ const methods = {
   },
   async writeProviderConfig(args) { return pluginModule.configProvider?.write?.(createStatusContext(), args); },
   async activateProvider(args) { return pluginModule.configProvider?.activateProvider?.(createStatusContext(), args); },
+  /** 账号登录：可能阻塞几十秒等用户在终端里完成 OAuth（插件自己控制超时）。 */
+  async loginProvider(args) { return pluginModule.configProvider?.login?.(createStatusContext(), args); },
+  async claimDailyCredit(args) { return pluginModule.configProvider?.claimDailyCredit?.(createStatusContext(), args); },
   async lookupModel(args) {
     const realtimeModels = await prefetchDiscoveryForConfig();
     return pluginModule.configProvider?.lookupModel?.(createStatusContext(), { ...args, realtimeModels });

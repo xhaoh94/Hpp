@@ -1625,8 +1625,13 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
 .composer-inline-button { display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: var(--surface-raised); color: var(--muted); }
 .composer-inline-button:active:not(:disabled),
 .composer-inline-button[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); }
-.composer-add-menu { position: absolute; bottom: calc(100% + 7px); left: 0; z-index: 45; display: flex; min-width: 120px; flex-direction: column; gap: 2px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42); }
-.composer-add-menu > button { display: grid; width: 100%; min-height: 36px; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font-size: 11px; text-align: left; }
+.composer-add-menu { position: absolute; bottom: calc(100% + 7px); left: 0; z-index: 45; display: flex; min-width: 208px; max-width: 72vw; flex-direction: column; gap: 0; padding: 4px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42); }
+/* 一行三元素（图标 / 文字 / 可选勾或箭头），用 flex 而不是 grid：
+   原来 grid 只有两列，带上勾的菜单项会把勾挤到第二行。 */
+.composer-add-menu > button { display: flex; width: 100%; min-height: 36px; align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font-size: 11px; text-align: left; }
+.composer-add-menu > button > svg:first-child { flex: none; width: 18px; }
+.composer-add-menu > button > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-add-menu > button > svg:last-child:not(:first-child) { flex: none; }
 .composer-add-menu > button:active:not(:disabled) { background: var(--surface-hover); }
 .composer-input-shell textarea { width: 100%; min-height: 36px; max-height: 78px; overflow-y: auto; padding: 8px 7px 7px; resize: none; border: 0; background: transparent; color: var(--text); line-height: 1.5; outline: none; scrollbar-width: none; }
 .composer-input-shell textarea::-webkit-scrollbar { display: none; width: 0; height: 0; }
@@ -1731,7 +1736,11 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
   bottom: calc(100% + 6px);
   left: 0;
   z-index: 30;
-  width: min(190px, calc(100vw - 84px));
+  /* 宽度跟着内容走：190px 定宽会把模型名和渠道名截断。
+     min-width 保住视觉下限，max-width 保证不顶出视口。 */
+  width: max-content;
+  min-width: min(190px, calc(100vw - 84px));
+  max-width: min(320px, calc(100vw - 24px));
   max-height: min(40dvh, 280px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -2079,4 +2088,30 @@ body.mobile-questionnaire-resizing { cursor: row-resize; user-select: none; }
   background: rgba(255, 255, 255, 0.14);
   color: #fff;
   cursor: pointer;
+}
+
+/* 加号菜单：分组分隔与权限二级选项 */
+/* 每两项之间一条线。margin 压到 0：行距只由按钮 padding 决定，
+   否则加一条线就等于把间隔撑大一倍（桌面端同一个坑）。 */
+.composer-add-divider {
+  flex: none;
+  height: 1px;
+  margin: 0 4px;
+  background: var(--border, rgba(255, 255, 255, 0.1));
+}
+.composer-add-menu button.active {
+  color: var(--text);
+}
+.composer-add-menu button.active > svg:last-child {
+  color: var(--accent);
+}
+.composer-add-menu button > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-add-menu > button:disabled {
+  opacity: 0.5;
 }

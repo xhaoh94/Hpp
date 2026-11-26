@@ -45,6 +45,10 @@ export interface PluginHostCapabilities {
   writeProviderConfig: boolean;
   activateProvider: boolean;
   lookupModel: boolean;
+  /** 插件支持在渠道弹窗里发起账号登录（configProvider.login）。 */
+  loginProvider: boolean;
+  /** 插件支持每日签到领积分（configProvider.claimDailyCredit）。 */
+  claimDailyCredit: boolean;
 }
 
 export class AgentPluginProcess {

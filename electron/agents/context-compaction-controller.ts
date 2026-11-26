@@ -70,6 +70,8 @@ interface SessionCompactionState {
   armedEpoch: number;
   /** 正在压缩，避免重入。 */
   compacting: boolean;
+  /** 压缩尝试序号：看门狗解除锁后，旧 compact() 的 finally 不能清掉新尝试。 */
+  compactionAttempt: number;
   /** 后端正在压缩（原生或手动）：期间上报的用量不是「当前上下文」，不能拿来判定。 */
   compactionActive: boolean;
   /** 压缩看门狗：后端既不回终态、compact() 也不拒绝时兜底解除压制。 */
@@ -87,6 +89,7 @@ const createState = (): SessionCompactionState => ({
   turnEpoch: 0,
   armedEpoch: 0,
   compacting: false,
+  compactionAttempt: 0,
   compactionActive: false,
   lastCompactionEndAt: 0,
   idleRetryAttempt: 0,
@@ -230,6 +233,10 @@ export class ContextCompactionController {
         // 「别再压了」，不能因为压缩自己的流式事件推进了回合序号就立刻重来一次。
         if (state.compactionActive) {
           state.compactionActive = false;
+          // compact() 可能永远不会 settle（后端卡死）：这里也要解除重入锁，
+          // 否则 tryCompact 会一直因为 compacting=true 提前返回。
+          state.compacting = false;
+          state.compactionAttempt += 1;
           state.armedEpoch = state.turnEpoch;
           state.lastCompactionEndAt = Date.now();
           this.clearCompactionWatchdog(state);
@@ -412,6 +419,7 @@ export class ContextCompactionController {
     // 同一回合只压一次（失败重试要等下一个回合）。
     state.armedEpoch = state.turnEpoch;
     state.compacting = true;
+    const attempt = ++state.compactionAttempt;
     void backend.compact()
       .then(() => {
         // 压缩成功后用量未必立刻回落：保持 armed=false，
@@ -430,7 +438,8 @@ export class ContextCompactionController {
         this.reportFailure(sessionId, state, message);
       })
       .finally(() => {
-        state.compacting = false;
+        // 看门狗可能已经解除锁并开始下一次尝试：旧尝试的 finally 不能清掉新锁。
+        if (state.compactionAttempt === attempt) state.compacting = false;
       });
   }
 
@@ -478,6 +487,10 @@ export class ContextCompactionController {
       if (this.states.get(sessionId) !== state) return;
       if (!state.compactionActive) return;
       state.compactionActive = false;
+      // 后端的 compact() 可能还在等一个永远不结束的进程：看门狗必须同时
+      // 清掉重入锁，否则这个会话的自动压缩会永久失效。
+      state.compacting = false;
+      state.compactionAttempt += 1;
       state.usedTokens = 0;
       state.above = false;
       state.armed = false;

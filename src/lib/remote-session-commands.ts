@@ -80,6 +80,43 @@ const hydrateRemoteComposerDocument = (
   return createComposerDocument(nodes);
 };
 
+/**
+ * 渠道 id → 渠道名。
+ *
+ * config 会在每次会话变化时推送，每次都走一遍 IPC 读配置没必要：
+ * 短 TTL 缓存足够反映用户在桌面改的渠道名，又不会让推送变慢。
+ */
+const PROVIDER_NAMES_TTL_MS = 5_000;
+const providerNamesCache = new Map<string, { at: number; names: Record<string, string> }>();
+
+/** 会话可能刚被删除：取不到 agent 就返回空，让移动端回退显示渠道 id。 */
+function getSessionAgentId(sessionId: string): string {
+  try {
+    return getSessionCommandTarget(sessionId).session.agentId;
+  } catch {
+    return "";
+  }
+}
+
+async function getProviderNames(agentId: string): Promise<Record<string, string>> {
+  const id = String(agentId || "").trim();
+  if (!id) return {};
+  const cached = providerNamesCache.get(id);
+  if (cached && Date.now() - cached.at < PROVIDER_NAMES_TTL_MS) return cached.names;
+  try {
+    const result = await window.electronAPI.agentConfigList(id);
+    const providers = result.success && result.config ? result.config.providers : [];
+    const names = Object.fromEntries(
+      providers.map((provider) => [provider.providerId, provider.displayName || provider.providerId]),
+    );
+    providerNamesCache.set(id, { at: Date.now(), names });
+    return names;
+  } catch {
+    // 读不到就让移动端回退显示渠道 id，不影响模型列表本身。
+    return {};
+  }
+}
+
 async function getSessionConfig(sessionId: string, includeModels = false): Promise<RemoteSessionConfig> {
   const state = await SessionCommandCoordinator.getSessionCommandConfig(sessionId, includeModels);
   const settings = await window.electronAPI.loadData("settings").catch(() => null) as
@@ -92,6 +129,7 @@ async function getSessionConfig(sessionId: string, includeModels = false): Promi
     // 输出详细等级随会话配置下发，让移动端与桌面端保持同一套渲染口径。
     outputDetailLevel: normalizeOutputDetailLevel(settings?.general?.outputDetailLevel),
     availableModels: state.availableModels,
+    providerNames: await getProviderNames(getSessionAgentId(sessionId)),
   };
 }
 

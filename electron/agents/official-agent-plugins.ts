@@ -39,6 +39,8 @@ const DEFAULT_CAPABILITIES: AgentCapabilities = {
   configuration: "none",
   providerActivation: "none",
   compaction: "none",
+  providerLogin: false,
+  providerCheckin: false,
 };
 
 function formatHttpStatus(status: number, statusText?: string): string {
@@ -160,6 +162,8 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+    providerLogin: input.providerLogin === true,
+    providerCheckin: input.providerCheckin === true,
     compaction: normalizeCompactionCapabilities(input.compaction),
   };
 }

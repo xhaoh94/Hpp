@@ -20,13 +20,19 @@ describe("compaction threshold is scoped by channel and model", () => {
     expect(rendererStore).toContain("contextCompactionThresholdKey(model)");
     expect(rendererStore).toContain("agentSetCompactionThreshold?.(normalized");
 
-    // 主进程从 settings 读映射 + 旧全局兜底，而不是只读一个数。
-    expect(managerSource).toContain("contextCompactionThresholds?: unknown");
+    // 主进程只从 settings 读「渠道 + 模型」映射，不再回退旧版全局值。
+    expect(managerSource).toContain("CONTEXT_COMPACTION_THRESHOLDS_KEY");
     expect(managerSource).toContain("normalizeContextCompactionThresholdMap");
     expect(managerSource).toContain("resolveContextCompactionThreshold");
+    expect(managerSource).toContain("LEGACY_COMPACTION_THRESHOLD_KEYS");
     // 读改写落在与其它设置共用的 settings 写队列里。
     expect(managerSource).toContain('queueNamedWrite("settings"');
     expect(managerSource).toContain("thresholds[key] = percent");
+    // 旧版字段只用于清除，不能再出现在读取/解析路径里。
+    expect(managerSource).not.toContain("legacyDefault");
+    expect(managerSource).not.toContain("legacyCompactionThreshold");
+    expect(rendererStore).not.toContain("LEGACY_SETTINGS_KEY");
+    expect(rendererStore).not.toContain("contextCompactionTiers");
   });
 
   it("switches to the new model's threshold after a model change", () => {

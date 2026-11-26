@@ -11,6 +11,7 @@ import { registerStorageUsageHandlers } from "./ipc/storage-usage-handlers";
 import { registerPiSDKHandlers } from "./ipc/pi-sdk-handlers";
 import { registerAgentStatusHandlers } from "./ipc/agent-handlers";
 import { registerAgentHandlers, shutdownAgentRuntime } from "./agents/agent-manager";
+import { startCreditCheckinScheduler } from "./agents/agent-config";
 import { initializeModelContextCatalog } from "./agents/model-context-catalog";
 import { registerWorktreeIpc } from "./worktree/ipc";
 import { registerGitIpc } from "./git/ipc";
@@ -539,6 +540,8 @@ if (singleInstanceLock) {
     registerPiSDKHandlers();
     registerAgentStatusHandlers();
     registerAgentHandlers(() => mainWindow);
+    // 每日积分自动领取：每分钟判断一次是否到了设定的时间。
+    startCreditCheckinScheduler();
     registerWorktreeIpc();
     registerGitIpc();
     registerChannelSyncHandlers();

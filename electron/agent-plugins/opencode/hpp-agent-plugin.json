@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "minHppVersion": "0.1.0",
   "description": "OpenCode CLI programming agent (1.x / 2.x)",
   "entry": "agent.mjs",
@@ -10,11 +10,21 @@
   "command": "opencode",
   "packageName": "opencode-ai",
   "packages": [
-    { "line": "v2", "name": "@opencode/cli", "label": "OpenCode 2.x（推荐）" },
-    { "line": "v1", "name": "opencode-ai", "label": "OpenCode 1.x" }
+    {
+      "line": "v2",
+      "name": "@opencode/cli",
+      "label": "OpenCode 2.x（推荐）"
+    },
+    {
+      "line": "v1",
+      "name": "opencode-ai",
+      "label": "OpenCode 1.x"
+    }
   ],
   "selfUpgrade": {
-    "args": ["upgrade"],
+    "args": [
+      "upgrade"
+    ],
     "majorFlag": "--major",
     "supportsTarget": true
   },
@@ -35,14 +45,26 @@
       "type": "provider",
       "storage": "plugin",
       "endpoints": [
-        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" },
-        { "id": "responses", "label": "Responses (/responses)" },
-        { "id": "anthropic-messages", "label": "Anthropic Messages (/v1/messages)" }
+        {
+          "id": "chat-completions",
+          "label": "Chat Completions (/chat/completions)"
+        },
+        {
+          "id": "responses",
+          "label": "Responses (/responses)"
+        },
+        {
+          "id": "anthropic-messages",
+          "label": "Anthropic Messages (/v1/messages)"
+        }
       ],
       "defaultEndpoint": "chat-completions",
       "pathLabel": "~/.config/opencode/opencode.json",
       "hint": "渠道由 OpenCode 插件读写 provider 配置。",
-      "modelDefaults": { "reasoning": false, "imageInput": false },
+      "modelDefaults": {
+        "reasoning": false,
+        "imageInput": false
+      },
       "fixedModelCapabilities": false,
       "modelListMode": "merge"
     }

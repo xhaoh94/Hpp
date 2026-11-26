@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pi",
   "name": "Pi",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "minHppVersion": "0.1.0",
   "description": "Pi SDK programming agent",
   "entry": "agent.mjs",
@@ -56,20 +56,50 @@
       "type": "provider",
       "storage": "plugin",
       "endpoints": [
-        { "id": "chat-completions", "label": "Chat Completions (/chat/completions)" },
-        { "id": "responses", "label": "Responses (/responses)" },
-        { "id": "anthropic-messages", "label": "Anthropic Messages (/messages)" },
-        { "id": "mistral-conversations", "label": "Mistral Conversations" },
-        { "id": "azure-openai-responses", "label": "Azure OpenAI Responses" },
-        { "id": "openai-codex-responses", "label": "OpenAI Codex Responses" },
-        { "id": "bedrock-converse-stream", "label": "Amazon Bedrock Converse" },
-        { "id": "google-generative-ai", "label": "Google Generative AI" },
-        { "id": "google-vertex", "label": "Google Vertex AI" }
+        {
+          "id": "chat-completions",
+          "label": "Chat Completions (/chat/completions)"
+        },
+        {
+          "id": "responses",
+          "label": "Responses (/responses)"
+        },
+        {
+          "id": "anthropic-messages",
+          "label": "Anthropic Messages (/messages)"
+        },
+        {
+          "id": "mistral-conversations",
+          "label": "Mistral Conversations"
+        },
+        {
+          "id": "azure-openai-responses",
+          "label": "Azure OpenAI Responses"
+        },
+        {
+          "id": "openai-codex-responses",
+          "label": "OpenAI Codex Responses"
+        },
+        {
+          "id": "bedrock-converse-stream",
+          "label": "Amazon Bedrock Converse"
+        },
+        {
+          "id": "google-generative-ai",
+          "label": "Google Generative AI"
+        },
+        {
+          "id": "google-vertex",
+          "label": "Google Vertex AI"
+        }
       ],
       "defaultEndpoint": "chat-completions",
       "pathLabel": "~/.pi/agent/models.json",
       "hint": "渠道由 Pi 插件无损读写 models.json，图片能力映射到模型 input。",
-      "modelDefaults": { "reasoning": false, "imageInput": false },
+      "modelDefaults": {
+        "reasoning": false,
+        "imageInput": false
+      },
       "fixedModelCapabilities": false,
       "modelEndpointOverrides": true,
       "modelListMode": "configured"

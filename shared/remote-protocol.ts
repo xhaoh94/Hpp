@@ -285,6 +285,11 @@ export interface RemoteSessionConfig {
    */
   outputDetailLevel?: OutputDetailLevel;
   availableModels?: RemoteModel[];
+  /**
+   * 渠道 id → 渠道名。移动端模型列表的一级标题显示渠道名，
+   * 缺省（旧版宿主）回退显示 id。
+   */
+  providerNames?: Record<string, string>;
 }
 
 export interface RemoteAgent {

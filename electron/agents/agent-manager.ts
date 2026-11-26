@@ -21,6 +21,11 @@ import {
   activateAgentProviderConfig,
   copyAgentProviderConfig,
   deleteAgentProviderConfig,
+  claimAgentCredit,
+  getCreditCheckinSettings,
+  loginAgentProvider,
+  runCreditCheckin,
+  setCreditCheckinSettings,
   getAgentConfigStateForBackend,
   getAgentBuiltinExtensions,
   getAgentBuiltinExtensionsResult,
@@ -270,13 +275,18 @@ async function loadSavedAgentCompactionConfig(agentId: string): Promise<AgentCom
 /**
  * 智能压缩阈值（%）。这是渲染层「上下文用量」弹窗里的设置。
  *
- * 按「渠道 + 模型」分别保存（`contextCompactionThresholds` 映射），
- * 旧版的全局 `contextCompactionThreshold` 只作为没有单独配置时的兜底。
+ * 只按「渠道 + 模型」保存（`contextCompactionThresholds` 映射）；没配置过的
+ * 模型一律用默认 100%（不自动压缩）。
  */
 interface SavedCompactionThresholds {
   thresholds: Record<string, number>;
-  legacyDefault?: number;
 }
+
+/** 已废弃的旧版全局阈值字段：不再读取，读到就从 settings 里清掉。 */
+const LEGACY_COMPACTION_THRESHOLD_KEYS = [
+  "contextCompactionThreshold",
+  "contextCompactionTiers",
+] as const;
 
 async function loadSavedCompactionThresholds(): Promise<SavedCompactionThresholds> {
   try {
@@ -284,26 +294,33 @@ async function loadSavedCompactionThresholds(): Promise<SavedCompactionThreshold
     // 解析失败会把这个用户配过的阈值全部丢掉 —— 表现是全部退回默认 100%，
     // 自动压缩静默失效，而且没有任何提示。
     return await queueNamedWrite("settings", async () => {
+      const settingsPath = getSettingsJsonPath();
       // 与渲染层设置读写共用同一份 settings.json：写在别处等于「拖完就变回默认值」。
       const settings = JSON.parse(
-        (await readFile(getSettingsJsonPath(), "utf8")).replace(/^\uFEFF/, ""),
-      ) as {
-        general?: {
-          contextCompactionThresholds?: unknown;
-          contextCompactionThreshold?: unknown;
-          contextCompactionTiers?: unknown;
-        };
-      };
-      const general = settings.general;
-      const legacyTiers = general?.contextCompactionTiers;
-      return {
-        thresholds: normalizeContextCompactionThresholdMap(general?.contextCompactionThresholds),
-        legacyDefault: general?.contextCompactionThreshold !== undefined
-          ? general.contextCompactionThreshold
-          : Array.isArray(legacyTiers) && legacyTiers.length > 0
-            ? legacyTiers[0]
-            : undefined,
-      };
+        (await readFile(settingsPath, "utf8")).replace(/^\uFEFF/, ""),
+      ) as Record<string, unknown>;
+      const general = isRecord(settings.general) ? settings.general : {};
+      const thresholds = normalizeContextCompactionThresholdMap(general[CONTEXT_COMPACTION_THRESHOLDS_KEY]);
+
+      // 旧版全局字段已不再生效：顺手删掉，避免 settings 里长期留着一个看不见的
+      // 45% 让人误以为它还在参与判定。清理失败不影响本次读取。
+      let removedLegacy = false;
+      for (const key of LEGACY_COMPACTION_THRESHOLD_KEYS) {
+        if (key in general) {
+          delete general[key];
+          removedLegacy = true;
+        }
+      }
+      if (removedLegacy) {
+        try {
+          settings.general = general;
+          await mkdir(dirname(settingsPath), { recursive: true });
+          await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+        } catch {
+          // 下次启动还会再试。
+        }
+      }
+      return { thresholds };
     });
   } catch {
     return { thresholds: {} };
@@ -329,6 +346,8 @@ async function persistCompactionThreshold(key: string, percent: number): Promise
       settings = {};
     }
     const general = isRecord(settings.general) ? settings.general : {};
+    // 顺手清掉旧版全局字段：它们已经不再参与判定，不该继续留在文件里。
+    for (const legacyKey of LEGACY_COMPACTION_THRESHOLD_KEYS) delete general[legacyKey];
     const thresholds = normalizeContextCompactionThresholdMap(general[CONTEXT_COMPACTION_THRESHOLDS_KEY]);
     thresholds[key] = percent;
     settings.general = { ...general, [CONTEXT_COMPACTION_THRESHOLDS_KEY]: thresholds };
@@ -371,7 +390,6 @@ export class AgentManager {
   private activeSessionId: string | null = null;
   private window: BrowserWindow | null = null;
   private compactionThresholdLoad: Promise<void> | null = null;
-  private compactionThresholdExplicitlySet = false;
   /** 按「渠道 + 模型」保存的阈值，settings 映射的进程内副本。 */
   private compactionThresholds: Record<string, number> = {};
   /**
@@ -379,8 +397,6 @@ export class AgentManager {
    * （拖动往往发生在读盘尚未落地的那几毫秒里）。
    */
   private compactionThresholdOverrides = new Set<string>();
-  /** 旧版全局阈值：只在该模型没有单独配置时兜底，保证升级后行为连续。 */
-  private legacyCompactionThreshold: unknown;
   /** 每个会话当前的模型，用来把阈值解析到「渠道 + 模型」这一级。 */
   private sessionModels = new Map<string, ContextCompactionThresholdModel>();
   /**
@@ -774,8 +790,8 @@ export class AgentManager {
   /**
    * 把智能压缩阈值（%）热更新到压缩控制器。
    *
-   * 阈值按「渠道 + 模型」保存：带 model 时只影响使用该模型的会话；
-   * 不带 model 的旧调用退回缺省阈值（兼容老渲染层）。
+   * 阈值只按「渠道 + 模型」保存：同一个模型可能开着多个会话，一起切换。
+   * 没有模型作用域的调用直接拒绝，避免再退化成全局设置。
    * 刻意不下发给各后端——触发统一由 Hpp 自己判定，各家配置保持原样。
    */
   async setCompactionThreshold(
@@ -785,38 +801,29 @@ export class AgentManager {
     const normalized = normalizeContextCompactionThreshold(percent);
     const sessionId = typeof target?.sessionId === "string" ? target.sessionId.trim() : "";
     const model = readContextCompactionModel(target?.model);
-
-    if (model) {
-      const key = contextCompactionThresholdKey(model)!;
-      if (sessionId) this.sessionModels.set(sessionId, model);
-      this.compactionThresholds[key] = normalized;
-      this.compactionThresholdOverrides.add(key);
-      // 落盘放在主进程：读改写整份 settings 必须和其它设置走同一条队列。
-      try {
-        await persistCompactionThreshold(key, normalized);
-      } catch (error: unknown) {
-        // 落盘失败不影响本次触发点（内存已更新），下次拖动会再写一次。
-        console.warn(`[agent-manager] 保存压缩阈值失败：${getErrorMessage(error)}`);
-      }
-      const appliedSessionIds: string[] = [];
-      // 同一渠道 + 模型可能开着多个会话：它们应该一起切换阈值。
-      for (const [sid, current] of this.sessionModels.entries()) {
-        if (current.provider !== model.provider || current.id !== model.id) continue;
-        this.compactionController.setSessionThreshold(sid, normalized);
-        appliedSessionIds.push(sid);
-      }
-      return { success: true, appliedSessionIds };
+    if (!model) {
+      return { success: false, error: "缺少渠道与模型，无法保存压缩阈值。", appliedSessionIds: [] };
     }
 
-    if (sessionId) {
-      this.compactionController.setSessionThreshold(sessionId, normalized);
-      return { success: true, appliedSessionIds: [sessionId] };
+    const key = contextCompactionThresholdKey(model)!;
+    if (sessionId) this.sessionModels.set(sessionId, model);
+    this.compactionThresholds[key] = normalized;
+    this.compactionThresholdOverrides.add(key);
+    // 落盘放在主进程：读改写整份 settings 必须和其它设置走同一条队列。
+    try {
+      await persistCompactionThreshold(key, normalized);
+    } catch (error: unknown) {
+      // 落盘失败不影响本次触发点（内存已更新），下次拖动会再写一次。
+      console.warn(`[agent-manager] 保存压缩阈值失败：${getErrorMessage(error)}`);
     }
-
-    // 没有作用域的旧调用：当作缺省阈值，只影响没有模型级配置的会话。
-    this.compactionThresholdExplicitlySet = true;
-    this.compactionController.setThreshold(normalized);
-    return { success: true, appliedSessionIds: [] };
+    const appliedSessionIds: string[] = [];
+    // 同一渠道 + 模型可能开着多个会话：它们应该一起切换阈值。
+    for (const [sid, current] of this.sessionModels.entries()) {
+      if (current.provider !== model.provider || current.id !== model.id) continue;
+      this.compactionController.setSessionThreshold(sid, normalized);
+      appliedSessionIds.push(sid);
+    }
+    return { success: true, appliedSessionIds };
   }
 
   /**
@@ -883,11 +890,7 @@ export class AgentManager {
     this.sessionModels.set(sessionId, model);
     this.compactionController.setSessionThreshold(
       sessionId,
-      resolveContextCompactionThreshold(
-        this.compactionThresholds,
-        model,
-        this.legacyCompactionThreshold,
-      ),
+      resolveContextCompactionThreshold(this.compactionThresholds, model),
     );
     // 分母也走同一份目录：界面显示的「上下文上限」、阈值百分比、插件的自动
     // 压缩触发点必须是同一个数。目录没收录的私有模型才退回插件上报的窗口。
@@ -913,16 +916,12 @@ export class AgentManager {
             if (typeof current === "number") merged[key] = current;
           }
           this.compactionThresholds = merged;
-          this.legacyCompactionThreshold = saved.legacyDefault;
           // 读盘期间可能已经有会话拿着默认阈值在跑：按刚读到的配置重算一次。
           for (const [sessionId, model] of this.sessionModels.entries()) {
             this.compactionController.setSessionThreshold(
               sessionId,
-              resolveContextCompactionThreshold(merged, model, saved.legacyDefault),
+              resolveContextCompactionThreshold(merged, model),
             );
-          }
-          if (!this.compactionThresholdExplicitlySet && saved.legacyDefault !== undefined) {
-            this.compactionController.setThreshold(saved.legacyDefault);
           }
         })
         .catch(() => undefined);
@@ -1962,7 +1961,8 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
         permissionMode,
         displayMessage: message,
         hostSystemPrompt: HPP_AGENT_SYSTEM_PROMPT,
-        clientMessageId: options?.clientMessageId,
+        // 会话级优先、没切过就用全局默认；每轮重新读，工具栏关掉后下一条消息就生效。
+          clientMessageId: options?.clientMessageId,
         action: options?.action,
       });
       return { success: true };
@@ -2386,6 +2386,25 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     return activateProviderAndReload(agentId, providerId);
   });
 
+  // 渠道账号登录：可能阻塞到用户在授权窗口里完成 OAuth（插件自己控制超时）。
+  ipcMain.handle("agentConfig:claimCredit", async (_event, agentId: string, providerId: string) => {
+    return claimAgentCredit(agentId, providerId);
+  });
+
+  ipcMain.handle("agentConfig:getCreditCheckin", async () => getCreditCheckinSettings());
+
+  ipcMain.handle("agentConfig:setCreditCheckin", async (_event, value: unknown) => setCreditCheckinSettings(value));
+
+  ipcMain.handle("agentConfig:runCreditCheckin", async () => runCreditCheckin());
+
+  ipcMain.handle("agentConfig:login", async (
+    _event,
+    agentId: string,
+    options?: { force?: boolean; timeoutMs?: number; newAccount?: boolean },
+  ) => {
+    return loginAgentProvider(agentId, options);
+  });
+
   ipcMain.handle("agent:sendGuidance", async (_event, message: string, images?: AgentImagePayload, sessionId?: string, options?: AgentSendOptions) => {
     try {
       const result = await agentManager.sendGuidance(sessionId, message, images, options);
@@ -2562,15 +2581,30 @@ export function registerAgentHandlers(getWindow: () => BrowserWindow | null) {
     if (!agent.isIdle() && !(await waitForAgentIdle(agent, 2000))) {
       return { success: false, error: "当前回合仍在运行，请等待完成后再压缩。" };
     }
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     try {
-      await withTimeout(
-        agent.compact(),
-        AGENT_COMPACT_TIMEOUT_MS,
-        "压缩上下文超时，插件未响应，请重试。",
-      );
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("压缩上下文超时，插件未响应，请重试。"));
+        }, AGENT_COMPACT_TIMEOUT_MS);
+        agent.compact!().then(resolve, reject);
+      });
       return { success: true };
     } catch (err: unknown) {
+      // 超时不能只拒绝 IPC：后端的 compact() 还在等 CLI 进程，必须 abort
+      // 把进程杀掉，否则这个会话会一直 SESSION_BUSY。
+      if (timedOut) {
+        try {
+          await agent.abort();
+        } catch {
+          // abort 失败不覆盖原始超时错误。
+        }
+      }
       return { success: false, error: getErrorMessage(err) };
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   });
 

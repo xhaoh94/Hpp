@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
-import { Bot, CheckCircle2, ChevronDown, Copy, CopyPlus, Eye, EyeOff, GripVertical, Loader2, Pencil, Plus, RefreshCw, Save, Search, Server, Trash2, X, Zap } from "lucide-react";
+import { Bot, CalendarCheck, CheckCircle2, ChevronDown, Copy, CopyPlus, ExternalLink, Eye, EyeOff, GripVertical, Loader2, LogIn, Pencil, Plus, RefreshCw, Save, Search, Server, Trash2, X, Zap } from "lucide-react";
+import type { AgentCreditCheckinSettings } from "@/types";
 import type { AgentConfigState, AgentCustomModelConfig, AgentModel, AgentProviderConfig, AgentProviderConfiguration, AgentProviderEndpoint, AgentRemoteModel } from "@/types";
 import { getAgentName } from "@/lib/agents";
 import { showFloatingToastMessage } from "@/lib/floating-toast";
@@ -64,12 +65,9 @@ const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProv
     apiKey: draft.apiKey.trim(),
     models: draft.models.map((model) => {
       const isBuiltin = model.isBuiltin === true;
-      // 只有 Agent 内置目录命中的模型由 Agent 管理能力；非内置模型始终保留用户自定义的
-      // 图片、思考和思考档位配置，不再被 agent 级 fixedModelCapabilities 覆盖。
-      // off 与其他档位共存时原样保存（仅选 off 在提交阶段已归为空）。
-      const supportedThinkingLevels = isBuiltin
-        ? []
-        : normalizeSupportedThinkingLevels(model.supportedThinkingLevels);
+      // 内置模型的档位由 Agent / 模型目录下发，但仍要落盘：否则运行时和模型选择器
+      // 拿不到档位（CodeBuddy 这类「能力来自 CLI 目录」的渠道就会显示为未启用）。
+      const supportedThinkingLevels = normalizeSupportedThinkingLevels(model.supportedThinkingLevels);
       // 端点覆盖只在选了非“继承渠道”时保留，URL 留空表示沿用渠道 URL。
       const baseUrl = model.endpoint ? (model.baseUrl || "").trim() : "";
       return {
@@ -92,10 +90,13 @@ const buildNormalizedProviderPayload = (draft: AgentProviderConfig, originalProv
 /** 草稿未满足保存条件时的说明（主动保存时才会提示）。 */
 const isProviderPayloadSavable = (
   payload: { providerId: string; baseUrl: string; apiKey: string; models: { id: string }[] },
+  options: { allowEmptyApiKey?: boolean } = {},
 ) => /^[a-zA-Z0-9._:-]+$/.test(payload.providerId)
   && !!payload.baseUrl
-  && !!payload.apiKey
-  && payload.models.length > 0
+  // 支持账号登录的 Agent（如 CodeBuddy）把登录态存在 CLI 里，渠道不存 token。
+  && (options.allowEmptyApiKey === true || !!payload.apiKey)
+  // 登录型渠道的模型列表来自 CLI 目录：目录还没生成时允许先保存，聊天走 CLI 默认模型。
+  && (options.allowEmptyApiKey === true || payload.models.length > 0)
   && payload.models.every((model) => !!model.id);
 
 type ThinkingLevelsMultiSelectProps = {
@@ -391,6 +392,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     : undefined;
   const configurable = !!providerConfiguration;
   const usesActivation = activeAgent?.capabilities.providerActivation === "single-active";
+  const supportsProviderLogin = activeAgent?.capabilities.providerLogin === true;
+  const supportsProviderCheckin = activeAgent?.capabilities.providerCheckin === true;
   const endpointOptions = providerConfiguration?.endpoints || [];
   const authModeOptions = providerConfiguration?.authModes || [];
   // 同一个渠道混多地中转站（GPT 走 /v1、Claude 走 /claude/v1）时，插件声明
@@ -460,6 +463,13 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
   // 渠道编辑改为主动保存：只有用户点“保存”或按 Ctrl+S 才写入。
   // lastSavedPayload 仅用于判断是否有未保存改动。
   const [savingProvider, setSavingProvider] = useState(false);
+  // 渠道账号登录（OAuth）：running 期间按钮显示「等待授权…」，hint 是等待文案。
+  const [providerLogin, setProviderLogin] = useState<{ running: boolean; hint?: string }>({ running: false });
+  const [checkin, setCheckin] = useState<{ running: boolean; text?: string; ok?: boolean }>({ running: false });
+  const [checkinSettings, setCheckinSettings] = useState<AgentCreditCheckinSettings>({ enabled: false, time: "08:05" });
+  // 签到入口做成一个小弹层：平时只占一个按钮，点开才有「立即领取 / 每天自动领取」。
+  const [checkinMenu, setCheckinMenu] = useState<{ top: number; left: number } | null>(null);
+  const checkinButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastSavedPayload = useRef("");
   const draftRef = useRef<AgentProviderConfig | null>(null);
   const editorOriginalProviderIdRef = useRef("");
@@ -858,6 +868,156 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     setStatus(null);
   }, []);
 
+  /**
+   * 渠道账号登录：插件自己弹授权窗口 / 轮询登录态，成功后把账号直接落成一条渠道。
+   * 多账号就是这样建的：登录两次就是两条渠道，切换渠道就是切账号。
+   */
+  /** 读取每日自动领取设置（只在支持签到的 Agent 上读）。 */
+  useEffect(() => {
+    if (!supportsProviderCheckin) return;
+    let cancelled = false;
+    void window.electronAPI
+      .agentConfigGetCreditCheckin()
+      .then((value) => {
+        if (!cancelled && value) setCheckinSettings(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [supportsProviderCheckin]);
+
+  const saveCheckinSettings = useCallback(
+    async (patch: Partial<AgentCreditCheckinSettings>) => {
+      const next = { ...checkinSettings, ...patch };
+      setCheckinSettings(next);
+      try {
+        const saved = await window.electronAPI.agentConfigSetCreditCheckin(next);
+        if (saved) setCheckinSettings(saved);
+      } catch (error) {
+        showFloatingToastMessage(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [checkinSettings],
+  );
+
+  useEffect(() => {
+    if (!checkinMenu) return;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (checkinButtonRef.current?.contains(target)) return;
+      const menu = document.getElementById("agent-config-checkin-menu");
+      if (menu?.contains(target)) return;
+      setCheckinMenu(null);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [checkinMenu]);
+
+  const toggleCheckinMenu = useCallback(() => {
+    setCheckinMenu((current) => {
+      if (current) return null;
+      const rect = checkinButtonRef.current?.getBoundingClientRect();
+      if (!rect) return null;
+      return {
+        top: rect.bottom + 6,
+        left: Math.max(12, Math.min(rect.left, window.innerWidth - 272)),
+      };
+    });
+  }, []);
+
+  /** 每日签到领积分：直接打 WorkBuddy 的 /v2/billing/meter/daily-checkin。 */
+  const handleClaimCredit = useCallback(async () => {
+    const providerId = selectedSavedProvider?.providerId;
+    if (!providerId || checkin.running) return;
+    setCheckin({ running: true });
+    try {
+      const result = await window.electronAPI.agentConfigClaimCredit(agentId, providerId);
+      if (!result.success) {
+        setCheckin({ running: false, ok: false, text: result.error || "领取失败" });
+        return;
+      }
+      const who = result.nickname ? `${result.nickname}：` : "";
+      const text =
+        result.state === "already"
+          ? `${who}今天已经领过了`
+          : result.state === "signed"
+            ? `${who}已领取${result.credit !== undefined ? ` ${result.credit} ` : " "}积分`
+            : `${who}${result.message || "领取完成"}`;
+      setCheckin({ running: false, ok: true, text });
+      showFloatingToastMessage(text);
+    } catch (error) {
+      setCheckin({ running: false, ok: false, text: error instanceof Error ? error.message : String(error) });
+    }
+  }, [agentId, checkin.running, selectedSavedProvider]);
+
+  const handleLoginAccount = useCallback(async (options?: { newAccount?: boolean }) => {
+    if (!providerConfiguration || providerLogin.running) return;
+    setStatus(null);
+    setProviderLogin({
+      running: true,
+      hint: options?.newAccount
+        ? "已打开浏览器授权页，登录完成后会自动建一条新渠道。"
+        : "正在读取当前已登录的 CodeBuddy 账号…",
+    });
+    try {
+      // 默认：把当前已登录账号导出成渠道（秒回，不弹浏览器）。
+      // newAccount：隔离环境登录一个新账号，已有账号不会被动。
+      const result = await window.electronAPI.agentConfigLogin(
+        agentId,
+        options?.newAccount ? { newAccount: true } : undefined,
+      );
+      if (!result.success || !result.provider) {
+        setStatus({ type: "error", text: result.error || "登录失败" });
+        if (result.hint) showFloatingToastMessage(result.hint);
+        return;
+      }
+      const account = result.provider;
+      const models: AgentCustomModelConfig[] = (account.models && account.models.length > 0
+        ? account.models
+        : [{ id: "auto", name: "Auto", reasoning: true, imageInput: true }]
+      ).map((model) => ({
+        id: model.id,
+        name: model.name || model.id,
+        reasoning: model.reasoning === true,
+        imageInput: model.imageInput === true,
+        ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+        // 能力全部来自 CodeBuddy CLI 目录：标记为内置，配置弹窗不再给手改控件。
+        isBuiltin: model.isBuiltin === true,
+        ...(model.hasThinkingLevels === true ? { hasThinkingLevels: true } : {}),
+        ...(model.supportedThinkingLevels?.length
+          ? { supportedThinkingLevels: model.supportedThinkingLevels }
+          : {}),
+      }));
+      const existing = config.providers.find((provider) => provider.providerId === account.providerId);
+      const payload = {
+        providerId: account.providerId,
+        displayName: account.displayName || account.providerId,
+        baseUrl: account.baseUrl || "https://www.codebuddy.ai",
+        apiKey: account.apiKey || "",
+        authMode: account.authMode || providerConfiguration.defaultAuthMode || "bearer",
+        endpoint: account.endpoint || providerConfiguration.defaultEndpoint,
+        models,
+        ...(existing ? { originalProviderId: account.providerId } : {}),
+      } as AgentProviderConfig & { originalProviderId?: string };
+      const saved = await window.electronAPI.agentConfigSave(agentId, payload);
+      if (!saved.success) {
+        setStatus({ type: "error", text: saved.error || "登录成功，但保存渠道失败" });
+        return;
+      }
+      if (saved.config) setConfig(saved.config);
+      if (saved.models) onModelsUpdated(agentId, saved.models);
+      setSelectedProviderId(payload.providerId);
+      lastEditedProviderByAgent.set(agentId, payload.providerId);
+      void loadConfig();
+      setStatus({ type: "success", text: `已登录并保存渠道：${payload.displayName}` });
+      if (result.hint) showFloatingToastMessage(result.hint);
+    } catch (error) {
+      setStatus({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setProviderLogin({ running: false });
+    }
+  }, [agentId, config.providers, loadConfig, onModelsUpdated, providerConfiguration, providerLogin.running]);
   const handleEditProvider = useCallback((provider: AgentProviderConfig) => {
     const nextDraft = cloneProvider(provider);
     setSelectedProviderId(provider.providerId);
@@ -1108,7 +1268,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     () => (draft ? buildNormalizedProviderPayload(draft, editorOriginalProviderId) : null),
     [draft, editorOriginalProviderId],
   );
-  const canSaveProviderDraft = !!providerDraftPayload && isProviderPayloadSavable(providerDraftPayload);
+  const canSaveProviderDraft = !!providerDraftPayload
+    && isProviderPayloadSavable(providerDraftPayload, { allowEmptyApiKey: supportsProviderLogin });
   const providerDraftSerialized = providerDraftPayload ? JSON.stringify(providerDraftPayload) : "";
   const providerDirty = canSaveProviderDraft && providerDraftSerialized !== lastSavedPayload.current;
 
@@ -1118,8 +1279,8 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
     const scope = editorScope.current;
     const saveAgentId = editorAgentIdRef.current;
     const payload = buildNormalizedProviderPayload(currentDraft, editorOriginalProviderIdRef.current);
-    if (!isProviderPayloadSavable(payload)) {
-      setStatus({ type: "error", text: "请先填写渠道 ID、渠道 URL、API Key，并至少保留一个模型。" });
+    if (!isProviderPayloadSavable(payload, { allowEmptyApiKey: supportsProviderLogin })) {
+      setStatus({ type: "error", text: supportsProviderLogin ? "请先填写渠道 ID 和渠道 URL。" : "请先填写渠道 ID、渠道 URL、API Key，并至少保留一个模型。" });
       return;
     }
     const serialized = JSON.stringify(payload);
@@ -1613,8 +1774,20 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   {builtinExtensionsEnabled.includes("mcp") && <span className="agent-config-mcp-dot" />}
                 </button>
               )}
-              <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>
-                <RefreshCw size={13} />
+              {/* 额度与签到记录在 WorkBuddy 控制台：CLI 侧没有查询接口。 */}
+              {supportsProviderLogin && (
+                <a
+                  className="btn-action agent-config-console-link"
+                  href="https://www.workbuddy.cn/profile/plans-usage"
+                  target="_blank"
+                  rel="noreferrer"
+                  title="在系统浏览器打开 WorkBuddy 控制台，查看剩余额度与每日积分"
+                >
+                  <ExternalLink size={13} />
+                  控制台 / 积分
+                </a>
+              )}
+              <button type="button" className="btn-action" onClick={handleReload} disabled={reloading}>                <RefreshCw size={13} />
                 {reloading ? "重载中..." : "重新载入当前配置"}
               </button>
             </div>
@@ -1705,10 +1878,41 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                     );
                   })}
                 </div>
-                <button type="button" className="filter-add-btn agent-config-add-provider" onClick={handleAddProvider} disabled={!!reorderingProviderId}>
-                  <Plus size={13} />
-                  新增渠道
-                </button>
+                <div className="agent-config-provider-footer">
+                  <button type="button" className="filter-add-btn agent-config-add-provider" onClick={handleAddProvider} disabled={!!reorderingProviderId}>
+                    <Plus size={13} />
+                    新增渠道
+                  </button>
+                  {supportsProviderLogin && (
+                    <button
+                      type="button"
+                      className="btn-action agent-config-login-provider"
+                      onClick={() => void handleLoginAccount()}
+                      disabled={providerLogin.running || !!reorderingProviderId}
+                      title="把系统里已登录（WorkBuddy / codebuddy CLI）的账号导入成渠道，不用重新授权"
+                    >
+                      {providerLogin.running
+                        ? <Loader2 size={13} className="agent-config-spin" />
+                        : <LogIn size={13} />}
+                      {providerLogin.running ? "处理中…" : "导入已登录账号"}
+                    </button>
+                  )}
+                  {supportsProviderLogin && (
+                    <button
+                      type="button"
+                      className="btn-action agent-config-login-provider"
+                      onClick={() => void handleLoginAccount({ newAccount: true })}
+                      disabled={providerLogin.running || !!reorderingProviderId}
+                      title="在独立目录登录另一个账号，和已导入的账号并存、可随时切换"
+                    >
+                      <Plus size={13} />
+                      登录新账号
+                    </button>
+                  )}
+                </div>
+                {providerLogin.hint && (
+                  <div className="agent-config-login-hint">{providerLogin.hint}</div>
+                )}
               </aside>
 
               <section className="agent-config-form">
@@ -1724,6 +1928,18 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                         <span className="agent-config-form-caption">{selectedSavedProvider.providerId}</span>
                       </div>
                       <div className="agent-config-form-actions">
+                        {supportsProviderCheckin && !String(selectedSavedProvider.apiKey || "").trim() && (
+                          <button
+                            ref={checkinButtonRef}
+                            type="button"
+                            className={`btn-action agent-config-checkin-btn ${checkinMenu ? "open" : ""}`}
+                            onClick={toggleCheckinMenu}
+                            title="签到领积分（每天可领一次）"
+                          >
+                            <CalendarCheck size={13} />
+                            签到
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="btn-action"
@@ -1921,7 +2137,12 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   </label>
                 )}
                 <label className="agent-config-field-wide">
-                  <span>sk-key</span>
+                  <span>
+                    sk-key
+                    {supportsProviderLogin && (
+                      <span className="agent-config-field-hint">（该 Agent 用 CLI 登录态，可留空）</span>
+                    )}
+                  </span>
                   <div className="agent-config-secret-input">
                     <input
                       value={draft.apiKey}
@@ -1962,21 +2183,29 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
                   <span className="agent-config-section-title">模型</span>
                   <span className="agent-config-models-count">{draft.models.length}</span>
                   <div className="agent-config-model-actions">
-                    <button
-                      type="button"
-                      className="btn-action agent-config-mini-btn"
-                      onClick={() => void handleFetchModels()}
-                      disabled={fetchingModels || !draft.baseUrl.trim()}
-                    >
-                      {fetchingModels ? <Loader2 size={13} className="agent-config-spin" /> : <RefreshCw size={13} />}
-                      {fetchingModels ? "获取中..." : "获取模型"}
-                    </button>
+                    {/* CodeBuddy 端点不是 OpenAI 兼容协议：模型由插件从 CLI 目录同步，不能「获取模型」。 */}
+                    {!supportsProviderLogin && (
+                      <button
+                        type="button"
+                        className="btn-action agent-config-mini-btn"
+                        onClick={() => void handleFetchModels()}
+                        disabled={fetchingModels || !draft.baseUrl.trim()}
+                      >
+                        {fetchingModels ? <Loader2 size={13} className="agent-config-spin" /> : <RefreshCw size={13} />}
+                        {fetchingModels ? "获取中..." : "获取模型"}
+                      </button>
+                    )}
                     <button type="button" className="btn-action agent-config-mini-btn" onClick={addModel}>
                       <Plus size={13} />
                       添加模型
                     </button>
                   </div>
                 </div>
+                {supportsProviderLogin && (
+                  <div className="agent-config-models-sync-hint">
+                    模型列表已从 CodeBuddy CLI 同步（{draft.models.length} 个）；想刷新时重新点一次「登录账号」即可。
+                  </div>
+                )}
                 <div className="agent-config-models-header">
                   <span />
                   <span className="agent-config-model-head-label">模型 ID</span>
@@ -2312,6 +2541,60 @@ export function AgentConfigModal({ agentId: initialAgentId, onClose, onModelsUpd
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {checkinMenu && supportsProviderCheckin && (
+        <div
+          id="agent-config-checkin-menu"
+          className="agent-config-checkin-popover"
+          style={{ top: checkinMenu.top, left: checkinMenu.left }}
+          // 弹层挂在遮罩内部：不吞掉 mousedown 的话会冒泡到遮罩的「点空白关闭」。
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="agent-config-checkin-popover-head">
+            <span>签到领积分</span>
+            <span className="agent-config-checkin-popover-sub">
+              {selectedSavedProvider?.displayName || selectedSavedProvider?.providerId}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn-action agent-config-checkin-now"
+            onClick={() => void handleClaimCredit()}
+            disabled={checkin.running || !selectedSavedProvider}
+          >
+            {checkin.running ? <Loader2 size={13} className="agent-config-spin" /> : <Zap size={13} />}
+            {checkin.running ? "领取中…" : "立即领取"}
+          </button>
+          {checkin.text && <div className="agent-config-checkin-popover-hint">{checkin.text}</div>}
+          <label className="agent-config-checkin-popover-row">
+            <input
+              type="checkbox"
+              checked={checkinSettings.enabled}
+              onChange={(event) => void saveCheckinSettings({ enabled: event.target.checked })}
+            />
+            <span>每天自动领取</span>
+            <input
+              type="time"
+              className="input-field agent-config-checkin-time"
+              value={checkinSettings.time}
+              disabled={!checkinSettings.enabled}
+              onChange={(event) => void saveCheckinSettings({ time: event.target.value })}
+            />
+          </label>
+          {checkinSettings.lastRunDate && (
+            <div className="agent-config-checkin-popover-hint">
+              上次 {checkinSettings.lastRunDate}
+              {checkinSettings.lastResults?.filter((item) => item.state === "signed").length
+                ? `（已领 ${checkinSettings.lastResults
+                    .filter((item) => item.state === "signed")
+                    .map((item) => `${item.displayName || item.providerId} +${item.credit ?? "?"}`)
+                    .join("、")}）`
+                : ""}
+            </div>
+          )}
         </div>
       )}
 

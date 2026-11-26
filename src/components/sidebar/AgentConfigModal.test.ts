@@ -82,9 +82,10 @@ describe("AgentConfigModal provider selection", () => {
 
   it("drops the 凭据 group label and keeps sk-key a full-width field", () => {
     expect(modalSource).not.toContain("凭据");
-    const keyIndex = modalSource.indexOf("<span>sk-key</span>");
-    const labelIndex = modalSource.lastIndexOf("<label", keyIndex);
-    expect(modalSource.slice(labelIndex, modalSource.indexOf(">", labelIndex) + 1)).toBe('<label className="agent-config-field-wide">');
+    const labelIndex = modalSource.indexOf('<label className="agent-config-field-wide">');
+    expect(labelIndex).toBeGreaterThan(-1);
+    // 全宽 label 只给 sk-key 用（其它字段是两列栅格）。
+    expect(modalSource.slice(labelIndex, labelIndex + 500)).toContain("sk-key");
   });
 
   it("keeps the selected channel summary fixed while only the model list scrolls", () => {
@@ -268,5 +269,17 @@ describe("AgentConfigModal provider selection", () => {
     expect(modalSource).toContain("void loadConfig();");
     expect(modalSource).toContain("await window.electronAPI.agentGetModels()");
     expect(modalSource).toContain("onModelsUpdated(agentId, models)");
+  });
+
+  it("shows a single account login entry next to the add-provider button", () => {
+    // 登录入口只保留一处：渠道列表底部、「新增渠道」旁边（空态不再重复渲染）。
+    expect(modalSource).toContain("登录账号");
+    expect(modalSource).toContain("agent-config-provider-footer");
+    expect(settingsStyles).toContain(".agent-config-provider-footer");
+    expect(modalSource).not.toContain("agent-config-empty-login");
+    // 不能复用渠道行内的 hover 操作位类名（那个类名带 opacity: 0，底部按钮会整块不可见）。
+    expect(modalSource).not.toContain('<div className="agent-config-provider-actions">\n                  <button type="button" className="filter-add-btn agent-config-add-provider"');
+    const footerCss = settingsStyles.slice(settingsStyles.indexOf(".agent-config-provider-footer {"));
+    expect(footerCss.slice(0, 200)).not.toContain("opacity: 0");
   });
 });

@@ -37,7 +37,8 @@ export function getAgentActionDisplayDescription(
   agentId: string | undefined,
   entry: Pick<AgentActionCatalogEntry, "name" | "description" | "argumentHint">,
 ): string {
-  const localized = agentId === "claude"
+  // CodeBuddy / Claude 的技能名基本通用（loop / review 等），共用一份中文描述。
+  const localized = agentId === "claude" || agentId === "codebuddy"
     ? CLAUDE_ACTION_DESCRIPTIONS_ZH_CN[entry.name.trim().toLowerCase()]
     : undefined;
   const description = localized || entry.description?.trim() || "";

@@ -5494,6 +5494,13 @@ body.chat-questionnaire-resizing .chat-bubble {
   opacity: 1;
 }
 
+/* 工具栏按钮置灰而不是隐藏，避免工具栏宽度跳动。 */
+.chat-toolbar-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background-color: transparent;
+}
+
 .chat-toolbar-select svg {
   flex-shrink: 0;
   color: var(--text-secondary);
@@ -5548,6 +5555,25 @@ body.chat-questionnaire-resizing .chat-bubble {
 
 .chat-dropdown-provider-group:first-of-type {
   border-top: none;
+}
+
+/* 键盘导航：上下移动时的临时高亮（和「当前」模型是两种状态）。 */
+.chat-dropdown-item.keyboard-active {
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-color);
+}
+
+/* 模型下拉：宽度跟着内容自适应（模型名后面带了 credits 倍率，定宽会截断），
+   只在接近视口边缘时收敛，仍然留出省略号。 */
+.chat-dropdown.chat-model-dropdown {
+  width: max-content;
+  min-width: min(240px, calc(100vw - 24px));
+  max-width: min(460px, calc(100vw - 24px));
+}
+
+.chat-dropdown.chat-model-dropdown .chat-dropdown-item,
+.chat-dropdown.chat-model-dropdown .chat-dropdown-provider {
+  gap: 8px;
 }
 
 .chat-model-dropdown-header + .chat-dropdown-provider-group {

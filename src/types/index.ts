@@ -16,6 +16,10 @@ import type {
   AgentPackageVersions,
   AgentPluginInstallResult,
   AgentProviderAuthMode,
+  AgentCreditClaimResult,
+  AgentCreditCheckinResult,
+  AgentCreditCheckinSettings,
+  AgentProviderLoginResult,
   AgentPluginManifest,
   OfficialAgentPluginCatalogResult,
   OfficialAgentPluginDescriptor,
@@ -180,6 +184,9 @@ export type {
   AgentProviderAuthMode,
   AgentProviderAuthOption,
   AgentProviderEndpointOption,
+  AgentCreditCheckinResult,
+  AgentCreditCheckinSettings,
+  AgentProviderLoginResult,
   AgentProviderActivationSupport,
   AgentPluginInstallResult,
   AgentPluginManifest,
@@ -572,6 +579,11 @@ export interface ElectronAPI {
   agentConfigSave: (agentId: string, config: AgentProviderConfig) => Promise<AgentConfigResult>;
   agentConfigCopy: (sourceAgentId: string, sourceProviderId: string, targetAgentId: string) => Promise<AgentConfigResult>;
   agentConfigActivate: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
+  agentConfigClaimCredit: (agentId: string, providerId: string) => Promise<AgentCreditClaimResult>;
+  agentConfigGetCreditCheckin: () => Promise<AgentCreditCheckinSettings>;
+  agentConfigSetCreditCheckin: (value: Partial<AgentCreditCheckinSettings>) => Promise<AgentCreditCheckinSettings>;
+  agentConfigRunCreditCheckin: () => Promise<{ success: boolean; results: AgentCreditCheckinResult[] }>;
+  agentConfigLogin: (agentId: string, options?: { force?: boolean; timeoutMs?: number; newAccount?: boolean }) => Promise<AgentProviderLoginResult>;
   agentConfigDelete: (agentId: string, providerId: string) => Promise<AgentConfigResult>;
   agentConfigReorder: (agentId: string, providerIds: string[]) => Promise<AgentConfigResult>;
   agentConfigExport: (data: unknown) => Promise<{ success: boolean; error?: string; canceled?: boolean; filePath?: string }>;

@@ -89,3 +89,16 @@ export function orderAgents<T extends { id: string }>(agents: T[], order?: strin
     return left - right;
   });
 }
+
+/**
+ * 项目卡片上的快捷按钮只显示 Agent 设置里勾选启用的 Agent。
+ *
+ * `enabledIds` 为 undefined/null 表示用户从未保存过启用列表（旧安装），
+ * 此时保持旧行为：全部显示。一旦保存过，就以保存值为准 —— 否则新装的插件
+ * 会绕过勾选自己冒出来。
+ */
+export function filterEnabledAgents<T extends { id: string }>(agents: T[], enabledIds?: string[] | null): T[] {
+  if (!enabledIds) return agents;
+  const enabled = new Set(enabledIds);
+  return agents.filter((agent) => enabled.has(agent.id));
+}

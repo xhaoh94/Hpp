@@ -2559,6 +2559,8 @@ export function ChatPanel({
     return sessionIds;
   }, [projects]);
   const [modelProviderOrder, setModelProviderOrder] = useState<string[]>([]);
+  // 渠道 id → 渠道名：模型下拉的一级标题显示这个，不要暴露内部 id。
+  const [modelProviderNames, setModelProviderNames] = useState<Record<string, string>>({});
   const modelProviders = useMemo(
     () => getOrderedModelProviders(
       availableModels.length > 0 ? includeCurrentModel(availableModels, currentModel) : [],
@@ -2572,11 +2574,16 @@ export function ChatPanel({
       const result = await window.electronAPI.agentConfigList(agentId);
       if (!result.success || !result.config) {
         setModelProviderOrder([]);
+        setModelProviderNames({});
         return;
       }
       setModelProviderOrder(result.config.providers.map((provider) => provider.providerId));
+      setModelProviderNames(Object.fromEntries(
+        result.config.providers.map((provider) => [provider.providerId, provider.displayName || provider.providerId]),
+      ));
     } catch {
       setModelProviderOrder([]);
+      setModelProviderNames({});
     }
   }, []);
 
@@ -4377,6 +4384,7 @@ export function ChatPanel({
           favoriteModels={favoriteModels}
           modelOpen={modelOpen}
           modelProviders={modelProviders}
+          providerNames={modelProviderNames}
           planModeEnabled={planModeEnabled}
           permissionMode={permissionMode}
           permissionModeSupported={permissionModeSupported}

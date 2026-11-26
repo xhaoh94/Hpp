@@ -288,9 +288,10 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
     }
   }, [agents, refreshAgentStatus]);
 
-  const openAgentConfig = useCallback(() => {
-    const activeAgentId = getActiveSessionAgentId();
-    setConfigAgentId(activeAgentId || agents[0]?.id || null);
+  const openAgentConfig = useCallback((agentId?: string) => {
+    // 不传时保持原有行为（当前会话的 Agent）；传值时从 Agent 列表直接打开对应渠道。
+    const targetId = agentId || getActiveSessionAgentId();
+    setConfigAgentId(targetId || agents[0]?.id || null);
   }, [agents]);
 
   const configAgent = configAgentId
@@ -498,7 +499,7 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
             <button
               type="button"
               className="btn-icon agent-settings-config-icon"
-              onClick={openAgentConfig}
+              onClick={() => openAgentConfig()}
               disabled={agents.length === 0}
               title="配置 Agent 渠道和模型"
               aria-label="配置 Agent 渠道和模型"
@@ -658,6 +659,16 @@ export function AgentSettingsView({ embedded = false }: AgentSettingsViewProps) 
                 </label>
 
                 <div className="agent-settings-actions">
+                  {(agent.capabilities?.configuration || "none") !== "none" && (
+                    <button
+                      className="btn-action agent-settings-refresh-btn"
+                      onClick={() => openAgentConfig(agent.id)}
+                      disabled={isAnyAgentUpdating}
+                      title="配置渠道与账号登录"
+                    >
+                      配置
+                    </button>
+                  )}
                   {agent.removable && (
                     <button
                       className="btn-action agent-settings-refresh-btn"

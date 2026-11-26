@@ -31,6 +31,8 @@ const defaultCapabilities = {
   configuration: "none",
   providerActivation: "none",
   compaction: "none",
+  providerLogin: false,
+  providerCheckin: false,
 };
 
 function parseVersion(version) {
@@ -221,6 +223,8 @@ function normalizeCapabilities(value) {
     actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+    providerLogin: input.providerLogin === true,
+    providerCheckin: input.providerCheckin === true,
     compaction: normalizeCompactionCapabilities(input.compaction),
   };
 }

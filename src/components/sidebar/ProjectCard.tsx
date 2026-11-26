@@ -9,7 +9,7 @@ import { SessionHistoryModal } from "@/components/shared/SessionHistoryModal";
 import { AttachmentPreviewText } from "@/components/shared/AttachmentPreviewText";
 import { BrailleSpinner } from "@/components/shared/BrailleSpinner";
 import { getSessionPreviewLabel } from "@/lib/chat-message-preview";
-import { getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
+import { filterEnabledAgents, getAgentName, getInstallHint, normalizeAgentOrder, orderAgents } from "@/lib/agents";
 import { SessionCommandCoordinator } from "@/lib/session-command-coordinator";
 import { purgeDeletedSessionData } from "@/hooks/useDataPersistence";
 import { hasNoSessionMessages } from "@/lib/session-lifecycle";
@@ -114,6 +114,8 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
     setSessionsCollapsed(project.sessionsCollapsed);
   }, [project.name, project.sessionsCollapsed]);
   const [agentOrder, setAgentOrder] = useState<string[]>([]);
+  // 设置页的「启用」勾选（general.enabledAgents）；null 表示用户从未保存过，按全部启用处理。
+  const [enabledAgentIds, setEnabledAgentIds] = useState<string[] | null>(null);
   const [installedAgents, setInstalledAgents] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
@@ -143,6 +145,8 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
       const settings = asRecord(data);
       const general = asRecord(settings.general);
       setAgentOrder(normalizeAgentOrder(getStringArray(general.agentOrder), agents));
+      const savedEnabled = getStringArray(general.enabledAgents);
+      setEnabledAgentIds(savedEnabled ? savedEnabled : null);
       setLoading(false);
 
       // Check all agents in parallel
@@ -168,8 +172,9 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
 
   useEffect(() => {
     const handleAgentSettingsUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ agentOrder?: string[] }>).detail;
+      const detail = (event as CustomEvent<{ agentOrder?: string[]; enabledAgents?: string[] }>).detail;
       if (Array.isArray(detail?.agentOrder)) setAgentOrder(normalizeAgentOrder(detail.agentOrder, agents));
+      if (Array.isArray(detail?.enabledAgents)) setEnabledAgentIds(detail.enabledAgents);
     };
     window.addEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
     return () => window.removeEventListener(AGENT_SETTINGS_UPDATED_EVENT, handleAgentSettingsUpdated);
@@ -368,9 +373,10 @@ export function ProjectCard({ project, initialSessionsCollapsed = false, isGitRe
   const handleDeleteHistorySession = (sessionId: string) =>
     handleDeleteHistorySessions([sessionId]);
 
+  // 卡片上的快捷按钮只显示设置页里勾选启用的 Agent；未勾选的新插件不应自己冒出来。
   const orderedAgents = useMemo(
-    () => orderAgents(agents, agentOrder),
-    [agents, agentOrder]
+    () => orderAgents(filterEnabledAgents(agents, enabledAgentIds), agentOrder),
+    [agents, agentOrder, enabledAgentIds],
   );
   const cardAgents = orderedAgents.slice(0, visibleAgentCount);
   const overflowAgents = orderedAgents.slice(visibleAgentCount);

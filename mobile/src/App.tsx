@@ -548,16 +548,22 @@ function hostAvailabilityLabel(state: HostAvailability) {
   return "检测中";
 }
 
+/** 旧版宿主不下发渠道名：稳定的空对象，避免每次渲染换引用。 */
+const EMPTY_PROVIDER_NAMES: Record<string, string> = {};
+
 function MobileModelPicker({
   agentName,
   currentModel,
   models,
+  providerNames,
   disabled,
   onSelect,
 }: {
   agentName: string;
   currentModel: RemoteModel | null;
   models: RemoteModel[];
+  /** 渠道 id → 渠道名；旧版宿主不提供时回退显示 id。 */
+  providerNames: Record<string, string>;
   disabled: boolean;
   onSelect: (model: RemoteModel) => void;
 }) {
@@ -618,7 +624,7 @@ function MobileModelPicker({
                   onClick={() => setExpandedProvider(expanded ? null : provider)}
                 >
                   <ChevronRight className="model-provider-chevron" size={14} />
-                  <span>{provider}</span>
+                  <span>{providerNames[provider] || provider}</span>
                   <small>{providerModels.length}</small>
                 </button>
                 {expanded && providerModels.map((model) => {
@@ -4508,6 +4514,29 @@ export default function App() {
     }
   }, []);
 
+  const togglePlanMode = useCallback(async () => {
+    const next = selectedConfig?.planModeEnabled !== true;
+    try {
+      const result = await runCommand<{ enabled: boolean }>("settings.setPlanMode", { enabled: next });
+      setConfigs((current) => Object.fromEntries(
+        Object.entries(current).map(([id, config]) => [id, { ...config, planModeEnabled: result.enabled }]),
+      ));
+    } catch {
+      // runCommand 已经把错误写到页面提示里。
+    }
+  }, [runCommand, selectedConfig?.planModeEnabled, setConfigs]);
+
+  const selectPermissionMode = useCallback(async (mode: AgentPermissionMode) => {
+    try {
+      const result = await runCommand<{ mode: AgentPermissionMode }>("settings.setPermissionMode", { mode });
+      setConfigs((current) => Object.fromEntries(
+        Object.entries(current).map(([id, config]) => [id, { ...config, permissionMode: result.mode }]),
+      ));
+    } catch {
+      // 同上。
+    }
+  }, [runCommand, setConfigs]);
+
   const loadAgentActions = useCallback(async (reload = false) => {
     if (!selectedSessionId || selectedAgent?.supportsActions !== true) {
       setActionCatalog([]);
@@ -5909,6 +5938,19 @@ export default function App() {
                         <WandSparkles size={15} /><span>技能</span>
                       </button>
                     )}
+                    <div className="composer-add-divider" role="separator" />
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={selectedConfig?.planModeEnabled === true}
+                      className={selectedConfig?.planModeEnabled === true ? "active" : ""}
+                      disabled={commandBusy}
+                      onClick={() => void togglePlanMode()}
+                    >
+                      <WandSparkles size={15} />
+                      <span>计划模式</span>
+                      {selectedConfig?.planModeEnabled === true && <Check size={14} />}
+                    </button>
                   </div>
                 )}
               </div>
@@ -5961,21 +6003,11 @@ export default function App() {
                   <span>{selectedReferenceSessions.length}</span>
                 </button>
               )}
-              <button
-                type="button"
-                className={`plan-toggle ${selectedConfig?.planModeEnabled === true ? "active" : ""}`}
-                aria-pressed={selectedConfig?.planModeEnabled === true}
-                disabled={commandBusy}
-                onClick={() => void runCommand<{ enabled: boolean }>("settings.setPlanMode", { enabled: selectedConfig?.planModeEnabled !== true }).then(({ enabled }) => setConfigs((current) => Object.fromEntries(Object.entries(current).map(([id, config]) => [id, { ...config, planModeEnabled: enabled }] ))))}
-              >
-                <WandSparkles size={14} />
-                <span>计划</span>
-              </button>
               {selectedAgent?.supportsPermissions === true && (
                 <MobilePermissionPicker
                   value={selectedConfig?.permissionMode || "auto"}
                   disabled={commandBusy}
-                  onSelect={(mode) => void runCommand<{ mode: AgentPermissionMode }>("settings.setPermissionMode", { mode }).then(({ mode: nextMode }) => setConfigs((current) => Object.fromEntries(Object.entries(current).map(([id, config]) => [id, { ...config, permissionMode: nextMode }] ))))}
+                  onSelect={(mode) => void selectPermissionMode(mode)}
                 />
               )}
               <MobileModelPicker
@@ -5983,6 +6015,7 @@ export default function App() {
                 agentName={selectedAgent?.name || selected.session.agentId}
                 currentModel={selectedConfig?.model || null}
                 models={selectedModels}
+                providerNames={selectedConfig?.providerNames || EMPTY_PROVIDER_NAMES}
                 disabled={commandBusy}
                 onSelect={(model) => void switchModel(model)}
               />

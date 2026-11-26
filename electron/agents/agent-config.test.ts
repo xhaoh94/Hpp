@@ -10,6 +10,8 @@ const testState = vi.hoisted(() => ({
   nativeState: undefined as unknown,
   writtenState: undefined as unknown,
   activationResult: {} as Record<string, unknown>,
+  loginResult: {} as Record<string, unknown>,
+  loginArgs: undefined as unknown,
 }));
 
 vi.mock("electron", () => ({
@@ -25,6 +27,10 @@ vi.mock("./agent-plugin-registry", () => ({
       return {};
     },
     activateProvider: async () => testState.activationResult,
+    loginProvider: async (_agentId: string, args: unknown) => {
+      testState.loginArgs = args;
+      return testState.loginResult;
+    },
   }),
 }));
 
@@ -66,6 +72,7 @@ describe("agent provider config", () => {
   let setAgentBackendModelsVisible: typeof import("./agent-config").setAgentBackendModelsVisible;
   let saveAgentSubagentConfig: typeof import("./agent-config").saveAgentSubagentConfig;
   let activateAgentProviderConfig: typeof import("./agent-config").activateAgentProviderConfig;
+  let loginAgentProvider: typeof import("./agent-config").loginAgentProvider;
 
   const writeSavedProviders = async () => {
     const dataDir = join(tempRoot, "hpp-data");
@@ -91,9 +98,12 @@ describe("agent provider config", () => {
     testState.nativeState = undefined;
     testState.writtenState = undefined;
     testState.activationResult = {};
+    testState.loginResult = {};
+    testState.loginArgs = undefined;
     vi.resetModules();
     ({
       activateAgentProviderConfig,
+      loginAgentProvider,
       copyAgentProviderConfig,
       deleteAgentProviderConfig,
       getAgentConfigStateForBackend,
@@ -796,5 +806,48 @@ describe("agent provider config", () => {
         thinkingLevelMode: "levels",
       },
     ]);
+  });
+
+  it("渠道登录：未声明 providerLogin 时直接拒绝", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerLogin: false,
+    };
+    await expect(loginAgentProvider("test-agent")).resolves.toMatchObject({
+      success: false,
+      error: "当前 Agent 不支持账号登录。",
+    });
+    expect(testState.loginArgs).toBeUndefined();
+  });
+
+  it("渠道登录：把插件返回的账号归一化成渠道草稿", async () => {
+    testState.capabilities = {
+      configuration: providerConfiguration("hpp"),
+      providerLogin: true,
+    };
+    testState.loginResult = {
+      success: true,
+      hint: "已打开终端",
+      provider: {
+        providerId: "codebuddy-abcd1234",
+        displayName: "CodeBuddy abcd1234",
+        baseUrl: "https://www.workbuddy.cn",
+        apiKey: "tok-123",
+        authMode: "bearer",
+        endpoint: "responses",
+        models: [{ id: "auto", name: "Auto", reasoning: true, imageInput: true }],
+      },
+    };
+    const result = await loginAgentProvider("test-agent", { force: true });
+    expect(result.success).toBe(true);
+    expect(result.hint).toBe("已打开终端");
+    expect(result.provider).toMatchObject({
+      providerId: "codebuddy-abcd1234",
+      baseUrl: "https://www.workbuddy.cn",
+      apiKey: "tok-123",
+      endpoint: "responses",
+    });
+    expect(result.provider?.models?.[0]?.id).toBe("auto");
+    expect(testState.loginArgs).toMatchObject({ force: true });
   });
 });

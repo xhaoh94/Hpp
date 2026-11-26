@@ -5,6 +5,8 @@ import type {
   AgentBuiltinExtensionCapabilities,
   AgentProviderAuthMode,
   AgentProviderConfiguration,
+  AgentCreditClaimResult,
+  AgentProviderLoginResult,
 } from "../../src/types/ipc";
 import { createCopiedProviderId, resolveCompatibleProviderEndpoint } from "../../shared/agent-provider-copy";
 import { normalizeSupportedThinkingLevels } from "../../shared/models";
@@ -451,11 +453,11 @@ async function enrichWithDiscoveredThinkingLevels(
           // 非内置模型显示控件。避免旧版保存的值残留。
           merged.isBuiltin = discoveredModel.isBuiltin === true;
           merged.hasThinkingLevels = discoveredModel.hasThinkingLevels === true;
-          // 内置模型的能力（reasoning/imageInput）以目录为权威。
+          // 内置模型的能力（reasoning/imageInput/思考档位）以目录为权威：目录有值时直接覆盖，
+          // 避免旧配置里的档位与插件/服务端最新下发的目录脱节。
           merged.reasoning = discoveredModel.reasoning;
           merged.imageInput = discoveredModel.imageInput;
-          // 旧配置没有档位时，用内置模型的内置档位预填（如 deepseek 的 high/max）。
-          if (!model.supportedThinkingLevels?.length && discoveredModel.supportedThinkingLevels?.length) {
+          if (discoveredModel.supportedThinkingLevels?.length) {
             merged.supportedThinkingLevels = discoveredModel.supportedThinkingLevels;
           }
           return merged;
@@ -505,7 +507,11 @@ async function persistAgentConfigState(
   await getAgentPluginRegistry().writeProviderConfig(agentId, state);
 }
 
-function validateProviderConfig(provider: AgentProviderConfig, configuration: AgentProviderConfiguration) {
+function validateProviderConfig(
+  provider: AgentProviderConfig,
+  configuration: AgentProviderConfiguration,
+  options: { allowEmptyApiKey?: boolean } = {},
+) {
   if (!/^[a-zA-Z0-9._:-]+$/.test(provider.providerId)) {
     throw new Error("渠道 ID 只能包含字母、数字、点、下划线、冒号和短横线。");
   }
@@ -517,7 +523,8 @@ function validateProviderConfig(provider: AgentProviderConfig, configuration: Ag
   if (!authModes.includes(provider.authMode)) {
     throw new Error(`当前插件不支持鉴权方式：${provider.authMode || "空"}`);
   }
-  if (!provider.apiKey) throw new Error("请填写 sk-key。");
+  // 登录态在 CLI 里的 Agent（如 CodeBuddy）渠道不存 token，所以允许空 apiKey。
+  if (!provider.apiKey && options.allowEmptyApiKey !== true) throw new Error("请填写 sk-key。");
   if (provider.models.length === 0) throw new Error("至少需要添加一个模型。");
   if (!configuration.modelEndpointOverrides) {
     const overridden = provider.models.find((model) => model.endpoint || model.baseUrl);
@@ -598,12 +605,21 @@ export async function lookupAgentModel(agentId: string, modelId: string): Promis
   }
 }
 
+/** Agent 是否支持账号登录（登录态在 CLI 里，渠道不需要 token）。 */
+async function allowsEmptyApiKey(agentId: string): Promise<boolean> {
+  try {
+    return (await getAgentPluginRegistry().getCapabilities(agentId)).providerLogin === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function saveAgentProviderConfig(agentId: string, providerValue: unknown): Promise<AgentConfigResult> {
   try {
     const configuration = await getProviderConfiguration(agentId);
     const provider = normalizeProvider(providerValue, configuration);
     if (!provider) throw new Error("渠道配置无效。");
-    validateProviderConfig(provider, configuration);
+    validateProviderConfig(provider, configuration, { allowEmptyApiKey: await allowsEmptyApiKey(agentId) });
     const originalProviderId = getOriginalProviderId(providerValue);
     const state = await readCurrentAgentConfigState(agentId, configuration);
     const replaceProviderId = originalProviderId || provider.providerId;
@@ -762,9 +778,238 @@ export async function activateAgentProviderConfig(
   const state = await readCurrentAgentConfigState(agentId, configuration);
   const provider = state.providers.find((item) => item.providerId === providerId);
   if (!provider) throw new Error("未找到要启用的渠道。");
-  validateProviderConfig(provider, configuration);
+  validateProviderConfig(provider, configuration, { allowEmptyApiKey: await allowsEmptyApiKey(agentId) });
   const result = await getAgentPluginRegistry().activateProvider(agentId, { providerId, provider, state });
   return { state, provider, snapshots: normalizeSnapshots(result.snapshots) };
+}
+
+/**
+ * 渠道账号登录（OAuth）。插件可以实现 configProvider.login：自己打开授权窗口
+ * 或轮询凭据文件，返回登录后的账号 token。这里只负责把返回值归一化成渠道草稿。
+ */
+/**
+ * 每日签到领积分（CodeBuddy / WorkBuddy）。插件不支持时返回明确错误，不抛。
+ */
+export async function claimAgentCredit(
+  agentId: string,
+  providerId: string,
+): Promise<AgentCreditClaimResult> {
+  try {
+    const capabilities = await getAgentPluginRegistry().getCapabilities(agentId);
+    if (capabilities.providerCheckin !== true) {
+      return { success: false, error: "当前 Agent 不支持签到领积分。" };
+    }
+    // 签到接口用的是 CLI 登录态。Token 渠道没有独立账号目录，插件会回退到
+    // 系统默认账号，导致“给 A 渠道签到、实际领到 B 账号”。这里直接拒绝。
+    const listed = await listAgentConfig(agentId).catch(() => null);
+    const provider = listed?.config?.providers?.find((item) => item.providerId === providerId);
+    if (provider && String(provider.apiKey || "").trim()) {
+      return {
+        success: false,
+        error: "该渠道使用 Token 登录，签到依赖 CLI 账号登录态，请切换到账号登录渠道。",
+      };
+    }
+    const raw = await getAgentPluginRegistry().claimDailyCredit(agentId, providerId);
+    const record = isRecord(raw) ? raw : {};
+    const state = record.state === "signed" || record.state === "already" ? record.state : undefined;
+    const credit = Number(record.credit);
+    const base: {
+      state?: "signed" | "already";
+      credit?: number;
+      message?: string;
+      uid?: string;
+      nickname?: string;
+    } = {
+      ...(state ? { state } : {}),
+      ...(Number.isFinite(credit) ? { credit } : {}),
+      ...(asString(record.message) ? { message: asString(record.message) } : {}),
+      ...(asString(record.uid) ? { uid: asString(record.uid) } : {}),
+      ...(asString(record.nickname) ? { nickname: asString(record.nickname) } : {}),
+    };
+    if (record.success === false) {
+      return { success: false, error: asString(record.error) || "签到失败。", ...base };
+    }
+    return { success: true, ...base };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 每日自动领取积分的设置（存在 settings.json 的 creditCheckin 段）。 */
+export interface CreditCheckinSettings {
+  enabled: boolean;
+  /** 24 小时制 HH:MM，当地时间。 */
+  time: string;
+  /** 最近一次自动执行日期（YYYY-MM-DD），用于一天只跑一次。 */
+  lastRunDate?: string;
+  lastResults?: Array<{
+    agentId: string;
+    providerId: string;
+    displayName?: string;
+    state?: string;
+    credit?: number;
+    error?: string;
+  }>;
+}
+
+const CREDIT_CHECKIN_KEY = "creditCheckin";
+const DEFAULT_CHECKIN_TIME = "08:05";
+
+function normalizeCheckinTime(value: unknown): string {
+  const text = asString(value);
+  const match = /^(\d{1,2}):(\d{2})$/.exec(text);
+  if (!match) return DEFAULT_CHECKIN_TIME;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return DEFAULT_CHECKIN_TIME;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return DEFAULT_CHECKIN_TIME;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function normalizeCheckinSettings(value: unknown): CreditCheckinSettings {
+  const record = isRecord(value) ? value : {};
+  return {
+    enabled: record.enabled === true,
+    time: normalizeCheckinTime(record.time),
+    ...(asString(record.lastRunDate) ? { lastRunDate: asString(record.lastRunDate) } : {}),
+    ...(Array.isArray(record.lastResults) ? { lastResults: record.lastResults as CreditCheckinSettings["lastResults"] } : {}),
+  };
+}
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+export async function getCreditCheckinSettings(): Promise<CreditCheckinSettings> {
+  const settings = await readJsonObject(getSettingsPath());
+  return normalizeCheckinSettings(settings[CREDIT_CHECKIN_KEY]);
+}
+
+export async function setCreditCheckinSettings(value: unknown): Promise<CreditCheckinSettings> {
+  const next = normalizeCheckinSettings(value);
+  await updateSettings((settings) => {
+    settings[CREDIT_CHECKIN_KEY] = next;
+  });
+  return next;
+}
+
+/**
+ * 对着所有支持签到的 Agent / 渠道各领一次。返回每个账号的结果。
+ * 一天内重复调用是安全的：上游会回「今天已签到」。
+ */
+export async function runCreditCheckin(): Promise<{
+  success: boolean;
+  results: NonNullable<CreditCheckinSettings["lastResults"]>;
+}> {
+  const results: NonNullable<CreditCheckinSettings["lastResults"]> = [];
+  try {
+    const registry = getAgentPluginRegistry();
+    const agents = await registry.listAgents();
+    for (const agent of agents) {
+      let capabilities: Awaited<ReturnType<typeof registry.getCapabilities>>;
+      try {
+        capabilities = await registry.getCapabilities(agent.id);
+      } catch {
+        continue;
+      }
+      if (capabilities.providerCheckin !== true) continue;
+      let config: AgentProviderConfig[] = [];
+      try {
+        const listed = await listAgentConfig(agent.id);
+        config = listed.config?.providers ?? [];
+      } catch {
+        continue;
+      }
+      for (const provider of config) {
+        // Token 渠道没有独立 CLI 登录态，签到会落到系统默认账号；跳过。
+        if (String(provider.apiKey || "").trim()) continue;
+        const claimed = await claimAgentCredit(agent.id, provider.providerId);
+        results.push({
+          agentId: agent.id,
+          providerId: provider.providerId,
+          ...(provider.displayName ? { displayName: provider.displayName } : {}),
+          ...(claimed.state ? { state: claimed.state } : {}),
+          ...(claimed.credit !== undefined ? { credit: claimed.credit } : {}),
+          ...(claimed.success ? {} : { error: claimed.error || "领取失败" }),
+        });
+      }
+    }
+  } catch (error) {
+    results.push({
+      agentId: "",
+      providerId: "",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return { success: results.every((item) => !item.error), results };
+}
+
+/** 每分钟检查一次：到了设定时间、今天还没跑过，就自动领取。 */
+export function startCreditCheckinScheduler(): void {
+  const tick = async () => {
+    try {
+      const settings = await getCreditCheckinSettings();
+      if (!settings.enabled) return;
+      const now = new Date();
+      const today = localDateKey(now);
+      if (settings.lastRunDate === today) return;
+      const [hours, minutes] = settings.time.split(":").map((part) => Number(part));
+      if (now.getHours() * 60 + now.getMinutes() < hours * 60 + minutes) return;
+      const { results } = await runCreditCheckin();
+      await updateSettings((draft) => {
+        const current = normalizeCheckinSettings(draft[CREDIT_CHECKIN_KEY]);
+        draft[CREDIT_CHECKIN_KEY] = { ...current, lastRunDate: today, lastResults: results };
+      });
+    } catch {
+      // 定时任务失败不打断主进程，下一分钟会再试（同一天会重复尝试，上游会拒绝重复领取）。
+    }
+  };
+  void tick();
+  setInterval(() => void tick(), 60_000).unref?.();
+}
+
+export async function loginAgentProvider(
+  agentId: string,
+  options: { force?: boolean; timeoutMs?: number; newAccount?: boolean } = {},
+): Promise<AgentProviderLoginResult> {
+  try {
+    const capabilities = await getAgentPluginRegistry().getCapabilities(agentId);
+    if (!capabilities.configuration || capabilities.configuration === "none") {
+      return { success: false, error: "当前 Agent 不支持渠道配置。" };
+    }
+    if (capabilities.providerLogin !== true) {
+      return { success: false, error: "当前 Agent 不支持账号登录。" };
+    }
+    const raw = await getAgentPluginRegistry().loginProvider(agentId, {
+      force: options.force === true,
+      ...(options.newAccount ? { newAccount: true } : {}),
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    const record = isRecord(raw) ? raw : {};
+    const hint = asString(record.hint) || undefined;
+    if (record.success === false) {
+      return { success: false, error: asString(record.error) || "登录失败。", ...(hint ? { hint } : {}) };
+    }
+    const provider = normalizeProvider(record.provider, capabilities.configuration);
+    if (!provider) {
+      return { success: false, error: asString(record.error) || "登录已完成，但插件没有返回账号信息。", ...(hint ? { hint } : {}) };
+    }
+    return {
+      success: true,
+      ...(hint ? { hint } : {}),
+      provider: {
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        authMode: provider.authMode,
+        endpoint: provider.endpoint,
+        models: provider.models,
+      },
+    };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function restoreNativeConfigSnapshot(snapshot: FileSnapshot) {
@@ -775,7 +1020,6 @@ export async function restoreNativeConfigSnapshot(snapshot: FileSnapshot) {
     await rm(snapshot.filePath, { force: true });
   }
 }
-
 export async function restoreNativeConfigSnapshots(snapshots: FileSnapshot[]) {
   for (const snapshot of snapshots) await restoreNativeConfigSnapshot(snapshot);
 }

@@ -623,4 +623,33 @@ describe("ContextCompactionController", () => {
       vi.useRealTimers();
     }
   });
+
+  it("lets a new compaction start after the watchdog releases a hung compact()", async () => {
+    // compact() 永远不 settle 时，watchdog 只清 compactionActive 不够：
+    // compacting 也必须解除，否则后续回合再也压不了。
+    vi.useFakeTimers();
+    try {
+      const { controller, compact } = createHarness({
+        threshold: 10,
+        compact: () => new Promise<void>(() => undefined),
+      });
+      controller.observeEvent(SESSION, startTurn);
+      controller.observeEvent(SESSION, usage(200_000));
+      controller.observeEvent(SESSION, endTurn);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(compact).toHaveBeenCalledTimes(1);
+
+      // 模拟后端已经进入压缩（真实场景由 context_compaction started 触发看门狗）。
+      controller.observeEvent(SESSION, { type: "context_compaction", id: "hung", phase: "started" });
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      controller.observeEvent(SESSION, startTurn);
+      controller.observeEvent(SESSION, usage(200_000));
+      controller.observeEvent(SESSION, endTurn);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(compact).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

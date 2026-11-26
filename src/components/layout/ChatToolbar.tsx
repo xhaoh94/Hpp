@@ -1,4 +1,4 @@
-import { useMemo, useRef, type ReactNode, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Check, Settings, Shield, ShieldAlert, ShieldCheck, WandSparkles } from "lucide-react";
 import type { ModelInfo } from "@/stores/chat-store";
@@ -22,6 +22,8 @@ type ChatToolbarProps = {
   favoriteModels: ModelInfo[];
   modelOpen: boolean;
   modelProviders: string[];
+  /** 渠道 id → 渠道名；缺失时回退显示 id。 */
+  providerNames: Record<string, string>;
   planModeEnabled: boolean;
   permissionMode: AgentPermissionMode;
   permissionModeSupported: boolean;
@@ -56,6 +58,7 @@ export function ChatToolbar({
   favoriteModels,
   modelOpen,
   modelProviders,
+  providerNames,
   planModeEnabled,
   permissionMode,
   permissionModeSupported,
@@ -92,12 +95,110 @@ export function ChatToolbar({
     return groupModelsByProvider(selectableModels);
   }, [selectableModels]);
   const isFavoriteModel = (model: ModelInfo) => favoriteModelKeys.has(`${model.provider}:${model.id}`);
+  // 已展开分组里的模型按显示顺序拍平：键盘上下就是在这一串里移动。
+  const flatModels = useMemo(
+    () => modelProviders.flatMap((provider) =>
+      expandedProvider === provider
+        ? (modelsByProvider.get(provider) || []).map((model) => ({ provider, model }))
+        : []
+    ),
+    [modelProviders, expandedProvider, modelsByProvider]
+  );
+  const modelIndexByKey = useMemo(() => {
+    const map = new Map<string, number>();
+    flatModels.forEach((entry, index) => map.set(`${entry.provider}:${entry.model.id}`, index));
+    return map;
+  }, [flatModels]);
+  const [modelCursor, setModelCursor] = useState(0);
+  /**
+   * 只有键盘导航才把高亮行滚进可视区。
+   *
+   * 鼠标悬浮也会更新光标（好让方向键从鼠标位置接着走），但那不是"移动"，
+   * 触发 scrollIntoView 会让列表在指针下自己跳一下。
+   */
+  const modelCursorScrollRef = useRef(false);
   const permissionMenuRef = useRef<HTMLDivElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const thinkingMenuRef = useRef<HTMLDivElement | null>(null);
   const permissionMenuStyle = useAnchoredOverlay(permissionOpen, permissionRef, permissionMenuRef);
+
+  // 打开下拉时自动展开当前模型所在分组，并把光标停在这条上（键盘直接就能用）。
+  useEffect(() => {
+    if (!modelOpen) return;
+    if (!expandedProvider && currentModel?.provider) {
+      onExpandedProviderChange(currentModel.provider);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelOpen]);
+
+  // 光标跟随当前模型 / 列表变化时收在合法范围内。
+  useEffect(() => {
+    if (!modelOpen) return;
+    const currentIndex = flatModels.findIndex(
+      (entry) => entry.model.id === currentModel?.id && entry.provider === currentModel?.provider
+    );
+    // 刚打开时把当前模型滚进可视区；之后只有键盘移动才滚。
+    modelCursorScrollRef.current = true;
+    setModelCursor(currentIndex >= 0 ? currentIndex : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelOpen, flatModels.length]);
   const modelMenuStyle = useAnchoredOverlay(modelOpen, modelRef, modelMenuRef);
   const thinkingMenuStyle = useAnchoredOverlay(thinkingOpen, thinkingRef, thinkingMenuRef);
+
+  // 键盘操作：上下移动高亮，Enter 应用，Esc 关闭。用捕获阶段是为了不被输入框抢走方向键。
+  useEffect(() => {
+    if (!modelOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (flatModels.length === 0) {
+          const firstProvider = modelProviders[0];
+          if (firstProvider) onExpandedProviderChange(firstProvider);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        modelCursorScrollRef.current = true;
+        setModelCursor((cursor) => (cursor + delta + flatModels.length) % flatModels.length);
+        return;
+      }
+      if (event.key === "Enter") {
+        const target = flatModels[modelCursor];
+        if (!target) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSelectModel(target.model);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onModelOpenChange(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [modelOpen, flatModels, modelProviders, modelCursor, onSelectModel, onModelOpenChange, onExpandedProviderChange]);
+
+  // 高亮行滚进可视区：只在键盘移动/刚打开时做，悬浮不滚。
+  //
+  // 不用 scrollIntoView：它会把所有可滚动祖先一起带着滚，鼠标划过相邻行时
+  // 外层对话区也跟着抖一下。这里只动下拉自己的 scrollTop。
+  useEffect(() => {
+    if (!modelOpen || !modelCursorScrollRef.current) return;
+    modelCursorScrollRef.current = false;
+    const container = modelMenuRef.current;
+    const row = container?.querySelector<HTMLElement>(`[data-model-index="${modelCursor}"]`);
+    if (!container || !row) return;
+    // 顶部是 sticky 标题栏，滚到顶的行会被它盖住，要把它算进可视区上边界。
+    const header = container.querySelector<HTMLElement>(".chat-dropdown-header");
+    const headerHeight = header?.offsetHeight ?? 0;
+    const visibleTop = container.scrollTop + headerHeight;
+    const visibleBottom = container.scrollTop + container.clientHeight;
+    const rowTop = row.offsetTop;
+    const rowBottom = rowTop + row.offsetHeight;
+    if (rowTop < visibleTop) container.scrollTop = Math.max(0, rowTop - headerHeight);
+    else if (rowBottom > visibleBottom) container.scrollTop = rowBottom - container.clientHeight;
+  }, [modelOpen, modelCursor]);
 
   return (
     <div className="chat-input-toolbar">
@@ -200,7 +301,7 @@ export function ChatToolbar({
           </svg>
         </button>
         {modelOpen && createPortal(
-          <div ref={modelMenuRef} style={modelMenuStyle} className="chat-dropdown" data-chat-toolbar-overlay>
+          <div ref={modelMenuRef} style={modelMenuStyle} className="chat-dropdown chat-model-dropdown" data-chat-toolbar-overlay>
             <div className="chat-model-dropdown-header">
               <span className="chat-model-dropdown-title">{getAgentName(agentId)} 模型</span>
               <span className="chat-model-dropdown-meta">{selectableModels.length} 个可用</span>
@@ -243,17 +344,26 @@ export function ChatToolbar({
                     >
                       <path d="M9 18l6-6-6-6" />
                     </svg>
-                    <span className="chat-dropdown-provider-name">{provider}</span>
+                    <span className="chat-dropdown-provider-name">{providerNames[provider] || provider}</span>
                     <span className="chat-dropdown-provider-count">{providerModels.length}</span>
                   </div>
                   {isExpanded && providerModels.map((model) => {
                     const isFav = isFavoriteModel(model);
                     const isActive = currentModel?.id === model.id && currentModel?.provider === model.provider;
+                    const flatIndex = modelIndexByKey.get(`${provider}:${model.id}`);
+                    const isCursor = flatIndex !== undefined && flatIndex === modelCursor;
                     return (
                       <div
                         key={model.id}
-                        className={`chat-dropdown-item ${isActive ? "active" : ""}`}
+                        data-model-index={flatIndex}
+                        className={`chat-dropdown-item ${isActive ? "active" : ""} ${isCursor ? "keyboard-active" : ""}`}
                         onClick={() => onSelectModel(model)}
+                        onMouseEnter={() => {
+                          // 顺手清掉键盘留下的待滚动标记：单模型列表里方向键不会让
+                          // 光标变化，标记会残留，下一次悬浮就会莫名滚一下。
+                          modelCursorScrollRef.current = false;
+                          if (flatIndex !== undefined) setModelCursor(flatIndex);
+                        }}
                       >
                         <span className="chat-dropdown-model-main">
                           <span className="truncate">{model.name}</span>

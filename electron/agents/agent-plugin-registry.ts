@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, shell } from "electron";
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -91,6 +91,8 @@ interface PluginActivateProviderResult {
 interface AgentHostApi {
   getCliAgentStatus(descriptor: AgentDescriptor): Promise<AgentPackageStatus>;
   updateCliAgent(descriptor: AgentDescriptor, versionSpec?: string): Promise<{ success: boolean; status?: AgentPackageStatus; error?: string }>;
+  /** 用系统默认浏览器打开 http(s) 链接（插件做账号登录时用）。 */
+  openExternal(url: string): Promise<{ success: boolean; error?: string }>;
 }
 
 interface CommandResult {
@@ -141,6 +143,8 @@ const DEFAULT_PLUGIN_CAPABILITIES: AgentCapabilities = {
   configuration: "none",
   providerActivation: "none",
   compaction: "none",
+  providerLogin: false,
+  providerCheckin: false,
 };
 
 // OpenCode 从 v1.18.18 起，运行中的会话收到新 prompt 默认以 steer 方式在
@@ -330,6 +334,8 @@ function normalizeCapabilities(value: unknown): AgentCapabilities {
     actions: input.actions === true,
     configuration: normalizeProviderConfiguration(input.configuration),
     providerActivation: input.providerActivation === "single-active" ? "single-active" : "none",
+    providerLogin: input.providerLogin === true,
+    providerCheckin: input.providerCheckin === true,
     compaction: normalizeCompactionCapabilities(input.compaction),
     subagent: normalizeSubagentCapabilities(input.subagent),
     builtinExtensions: normalizeBuiltinExtensionCapabilities(input.builtinExtensions),
@@ -1349,6 +1355,30 @@ export class AgentPluginRegistry {
     return await pluginProcess.call("activateProvider", args) as PluginActivateProviderResult || {};
   }
 
+  /** 渠道账号登录：需要插件导出 configProvider.login。 */
+  async loginProvider(agentId: string, args: unknown): Promise<unknown> {
+    await this.ensureLoaded();
+    const record = this.pluginRecords.get(agentId);
+    if (!record) throw new Error(`未安装 agent 插件：${agentId}`);
+    const pluginProcess = await this.getPluginProcess(record);
+    if (!record.processCapabilities?.loginProvider) {
+      throw new Error(`插件 ${record.descriptor.id} 未导出 configProvider.login。`);
+    }
+    return await pluginProcess.call("loginProvider", args);
+  }
+
+  /** 每日签到领积分：需要插件导出 configProvider.claimDailyCredit。 */
+  async claimDailyCredit(agentId: string, providerId: string): Promise<unknown> {
+    await this.ensureLoaded();
+    const record = this.pluginRecords.get(agentId);
+    if (!record) throw new Error(`未安装 agent 插件：${agentId}`);
+    const pluginProcess = await this.getPluginProcess(record);
+    if (!record.processCapabilities?.claimDailyCredit) {
+      return { success: false, error: "当前 Agent 不支持签到领积分。" };
+    }
+    return await pluginProcess.call("claimDailyCredit", { providerId });
+  }
+
   async getStatus(agentId: string): Promise<AgentPackageStatus> {
     if (this.stopping || this.permanentShutdown) return this.getStoppedStatus(agentId);
     const cached = this.statusCache.get(agentId);
@@ -1800,6 +1830,17 @@ export class AgentPluginRegistry {
     return {
       getCliAgentStatus: (descriptor) => getCliAgentStatus(resolveDescriptor(descriptor)),
       updateCliAgent: (descriptor, versionSpec) => updateCliAgent(resolveDescriptor(descriptor), versionSpec),
+      openExternal: async (url) => {
+        const value = String(url || "").trim();
+        // 只允许 http(s)：避免插件借这个口子打开本地文件或自定义协议。
+        if (!/^https?:\/\//i.test(value)) return { success: false, error: "只允许打开 http(s) 链接。" };
+        try {
+          await shell.openExternal(value);
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: getErrorMessage(error) };
+        }
+      },
     };
   }
 

@@ -51,13 +51,10 @@ export function contextCompactionThresholdKey(
  * 用户没配过的时候擅自压掉上下文。想提前压就把滑块往左拖。
  */
 export function normalizeContextCompactionThreshold(value: unknown): number {
-  const raw = typeof value === "number"
-    ? value
-    : isRecord(value) && typeof value.percent === "number"
-      ? value.percent
-      : undefined;
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_CONTEXT_COMPACTION_THRESHOLD;
-  return Math.round(Math.min(CONTEXT_THRESHOLD_MAX, Math.max(CONTEXT_THRESHOLD_MIN, raw)));
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_CONTEXT_COMPACTION_THRESHOLD;
+  }
+  return Math.round(Math.min(CONTEXT_THRESHOLD_MAX, Math.max(CONTEXT_THRESHOLD_MIN, value)));
 }
 
 /**
@@ -83,20 +80,18 @@ export function normalizeContextCompactionThresholdMap(value: unknown): Record<s
 }
 
 /**
- * 取某个模型的阈值：模型条目优先，其次旧版的全局值（升级兼容），最后默认值。
+ * 取某个模型的阈值：只认「渠道 + 模型」这一条，没有就回默认 100%。
  * 同一渠道 + 同一模型在不同 Agent 下共用一条 —— 阈值是用户对这个模型的经验值。
  */
 export function resolveContextCompactionThreshold(
   thresholds: Record<string, number> | null | undefined,
   model: ContextCompactionThresholdModel | null | undefined,
-  legacyDefault?: unknown,
 ): number {
   const key = contextCompactionThresholdKey(model);
   const scoped = key ? thresholds?.[key] : undefined;
   if (typeof scoped === "number" && Number.isFinite(scoped)) {
     return normalizeContextCompactionThreshold(scoped);
   }
-  if (legacyDefault !== undefined) return normalizeContextCompactionThreshold(legacyDefault);
   return DEFAULT_CONTEXT_COMPACTION_THRESHOLD;
 }
 

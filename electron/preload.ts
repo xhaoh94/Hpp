@@ -405,6 +405,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agentConfig:copy", sourceAgentId, sourceProviderId, targetAgentId),
   agentConfigActivate: (agentId: string, providerId: string) =>
     ipcRenderer.invoke("agentConfig:activate", agentId, providerId),
+  agentConfigClaimCredit: (agentId: string, providerId: string) =>
+    ipcRenderer.invoke("agentConfig:claimCredit", agentId, providerId),
+  agentConfigGetCreditCheckin: () => ipcRenderer.invoke("agentConfig:getCreditCheckin"),
+  agentConfigSetCreditCheckin: (value: unknown) => ipcRenderer.invoke("agentConfig:setCreditCheckin", value),
+  agentConfigRunCreditCheckin: () => ipcRenderer.invoke("agentConfig:runCreditCheckin"),
+  agentConfigLogin: (agentId: string, options?: { force?: boolean; timeoutMs?: number; newAccount?: boolean }) =>
+    ipcRenderer.invoke("agentConfig:login", agentId, options),
   agentConfigDelete: (agentId: string, providerId: string) =>
     ipcRenderer.invoke("agentConfig:delete", agentId, providerId),
   agentConfigReorder: (agentId: string, providerIds: string[]) =>
