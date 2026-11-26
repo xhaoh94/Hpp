@@ -245,7 +245,8 @@ describe("Pi built-in subagent extension", () => {
       // 路径必须拼在截断之外，模型才拿得到全文。
       expect(text).toContain("[完整输出]");
       const pathLine = text.split("\n").find((line) => line.includes(".result.md")) || "";
-      const filePath = (pathLine.match(/([A-Za-z]:.*\.result\.md)/) || [])[1] || "";
+      // 路径在 Windows 上是 C:\...，在 Linux/macOS 上是 /tmp/...，用平台无关的字符类提取。
+      const filePath = (pathLine.match(/([^\s：（）]+?\.result\.md)/) || [])[1] || "";
       expect(filePath).not.toBe("");
       const body = await readFile(filePath, "utf8");
       expect(body).toContain(longText);
