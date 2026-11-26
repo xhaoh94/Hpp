@@ -1620,14 +1620,17 @@ describe("Pi 后台子 Agent", () => {
       await vi.waitFor(() => expect(prepareHostTurn).toHaveBeenCalledTimes(1), { timeout: 10_000 });
 
       // 合并窗口内完成的两个任务只触发一次宿主回合。
+      // 后台任务按完成顺序入列，派发顺序与完成顺序可能不同，只比较集合。
       expect(prepareHostTurn).toHaveBeenCalledTimes(1);
-      expect(prepareHostTurn).toHaveBeenCalledWith({ taskIds });
+      const wakeIds = (prepareHostTurn.mock.calls[0]?.[0] as { taskIds?: string[] } | undefined)?.taskIds ?? [];
+      expect([...wakeIds].sort()).toEqual([...taskIds].sort());
       expect(sendMessage).toHaveBeenCalledTimes(1);
+      const autoWakeIds = (
+        sendMessage.mock.calls[0]?.[0] as { details?: { taskIds?: string[] } } | undefined
+      )?.details?.taskIds ?? [];
+      expect([...autoWakeIds].sort()).toEqual([...taskIds].sort());
       expect(sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          customType: "hpp-subagent-result",
-          details: expect.objectContaining({ autoWake: true, taskIds }),
-        }),
+        expect.objectContaining({ customType: "hpp-subagent-result", details: expect.objectContaining({ autoWake: true }) }),
         { triggerTurn: true },
       );
     } finally {
