@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "codebuddy",
   "name": "CodeBuddy",
-  "version": "1.0.15",
+  "version": "1.0.18",
   "minHppVersion": "0.1.0",
   "description": "Tencent CodeBuddy / WorkBuddy CLI programming agent",
   "entry": "agent.mjs",
@@ -14,10 +14,10 @@
   "updateCommand": "npm install -g @tencent-ai/codebuddy-code@latest",
   "shortName": "CB",
   "capabilities": {
-    "planMode": "prompt",
+    "planMode": "native",
     "permissions": true,
-    "guidance": false,
-    "fork": false,
+    "guidance": true,
+    "fork": true,
     "actions": true,
     "providerLogin": true,
     "configuration": {

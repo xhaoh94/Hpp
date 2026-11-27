@@ -16,6 +16,8 @@ type MutableCodebuddyAgent = {
   handleClose: (revision: number, code: number | null) => void;
   loadProviderConfig: (initializing?: boolean) => Promise<void>;
   resolveSelectedSkill: (action?: { kind?: string; name?: string }) => unknown;
+  proc: { stdin: { write: (text: string) => void; writableEnded: boolean; destroyed: boolean; end: () => void }; exitCode: number | null } | null;
+  pendingGuidance: number;
 };
 
 const mutable = (agent: CodebuddyAgent) => agent as unknown as MutableCodebuddyAgent;
@@ -404,5 +406,132 @@ describe("CodebuddyAgent skills", () => {
     const agent = new CodebuddyAgent("session-one");
     expect(mutable(agent).resolveSelectedSkill(undefined)).toBeNull();
     expect(mutable(agent).resolveSelectedSkill({ kind: "command", name: "loop" })).toBeNull();
+  });
+});
+
+describe("CodebuddyAgent guidance", () => {
+  it("空闲时拒绝引导", async () => {
+    const agent = new CodebuddyAgent("session-one");
+    await expect(agent.sendGuidance("插一句")).rejects.toThrow("SESSION_NOT_RUNNING");
+  });
+
+  it("运行中把引导写入 stdin，但不结束回合", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const agent = new CodebuddyAgent("session-one", (event) => events.push(event as Record<string, unknown>));
+    const writes: string[] = [];
+    const fakeProc = {
+      stdin: {
+        write: (text: string) => { writes.push(text); },
+        writableEnded: false,
+        destroyed: false,
+        end: () => undefined,
+      },
+      exitCode: null,
+    };
+    Object.assign(mutable(agent), {
+      turnActive: true,
+      turnRevision: 1,
+      turnKind: "chat",
+      proc: fakeProc,
+    });
+
+    const result = await agent.sendGuidance("改为只回复 999");
+
+    expect(result.guidanceId).toMatch(/^codebuddy-guidance-/);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain("999");
+    expect(mutable(agent).pendingGuidance).toBe(1);
+    expect(mutable(agent).turnActive).toBe(true);
+    // 必须发确认事件，否则渲染层的队列项一直显示“等待插入”。
+    expect(events).toContainEqual(expect.objectContaining({ type: "guidance_response_started" }));
+  });
+
+  it("取消引导时明确告知无法撤回", async () => {
+    const agent = new CodebuddyAgent("session-one");
+    await expect(agent.cancelGuidance("g1")).resolves.toEqual({
+      cancelled: false,
+      reason: expect.stringContaining("无法撤回"),
+    });
+  });
+});
+
+describe("CodebuddyAgent fork", () => {
+  it("生成 fork 描述符，包含源会话和新会话 ID", async () => {
+    const agent = new CodebuddyAgent("session-one");
+    const result = await agent.forkSession({
+      newSessionId: "new-session-id",
+      sourceSessionFilePath: "source-session-id",
+      sourceUserMessageIndex: 0,
+      targetTurnId: "turn-1",
+    });
+    expect(result.supported).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.sessionFilePath).toMatch(/^hpp-codebuddy-fork:v1:/);
+    const encoded = result.sessionFilePath!.slice("hpp-codebuddy-fork:v1:".length);
+    expect(Buffer.from(encoded, "base64url").toString("utf8")).toContain("new-session-id");
+  });
+
+  it("缺少会话 ID 时 fork 失败", async () => {
+    const agent = new CodebuddyAgent("session-one");
+    const result = await agent.forkSession({ newSessionId: "", sourceUserMessageIndex: 0 });
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("缺少");
+  });
+
+  it("会话 ID 含非法字符时拒绝 fork", async () => {
+    const agent = new CodebuddyAgent("session-one");
+    const result = await agent.forkSession({
+      newSessionId: "bad id with space",
+      sourceSessionFilePath: "source",
+      sourceUserMessageIndex: 0,
+    });
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("非法字符");
+  });
+});
+
+describe("CodebuddyAgent plan", () => {
+  it("TaskCreate 转成 plan_update 步骤，不发普通工具卡片", () => {
+    const events: Array<Record<string, unknown>> = [];
+    const agent = new CodebuddyAgent("session-one", (event) => events.push(event as Record<string, unknown>));
+    const line = (payload: Record<string, unknown>) => JSON.stringify(payload);
+
+    mutable(agent).turnKind = "chat";
+    mutable(agent).handleLine(line({
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use", id: "task-1", name: "TaskCreate",
+        input: { subject: "添加记住我复选框" },
+      }] },
+    }), 0);
+
+    expect(events).toContainEqual(expect.objectContaining({ type: "plan_update" }));
+    const plan = events.find((e) => e.type === "plan_update") as { steps: Array<{ title: string; status: string }> };
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.steps[0].title).toBe("添加记住我复选框");
+    expect(plan.steps[0].status).toBe("pending");
+    expect(events.some((e) => e.type === "tool_start")).toBe(false);
+  });
+
+  it("TaskUpdate 更新对应步骤状态", () => {
+    const events: Array<Record<string, unknown>> = [];
+    const agent = new CodebuddyAgent("session-one", (event) => events.push(event as Record<string, unknown>));
+    const line = (payload: Record<string, unknown>) => JSON.stringify(payload);
+
+    mutable(agent).turnKind = "chat";
+    mutable(agent).handleLine(line({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t1", name: "TaskCreate", input: { subject: "步骤一" } },
+      { type: "tool_use", id: "t2", name: "TaskCreate", input: { subject: "步骤二" } },
+    ] } }), 0);
+    mutable(agent).handleLine(line({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t3", name: "TaskUpdate", input: { taskId: "2", status: "in_progress" } },
+    ] } }), 0);
+
+    const plans = events.filter((e) => e.type === "plan_update") as Array<{ steps: Array<{ title: string; status: string }> }>;
+    const last = plans[plans.length - 1];
+    expect(last.steps.map((s) => [s.title, s.status])).toEqual([
+      ["步骤一", "pending"],
+      ["步骤二", "running"],
+    ]);
   });
 });

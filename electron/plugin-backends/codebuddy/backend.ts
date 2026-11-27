@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { AgentImagePayload } from "../../../src/types/ipc";
 import type { AgentActionCatalogEntry, AgentActionListOptions } from "../../../shared/agent-actions";
+import type { AgentForkResult, AgentForkTarget } from "../../agents/agent-backend";
+import type { AgentProcessStep } from "../../../src/stores/chat-store";
 import { AgentEventBuffer } from "../../plugin-runtime/agent-event-buffer";
 import { normalizeToolEvent } from "../../plugin-runtime/process-events";
 import {
@@ -82,6 +84,25 @@ const PROVIDER_ENV_KEYS = [
   "CODEBUDDY_ACCOUNT_ID",
 ] as const;
 const SAFE_ARG_TOKEN = /^[A-Za-z0-9._:-]+$/;
+const FORK_DESCRIPTOR_PREFIX = "hpp-codebuddy-fork:v1:";
+const UUID_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** 把 fork 信息编码进 sessionFilePath，随新会话带到 init。 */
+function createForkDescriptor(sourceSessionId: string, newSessionId: string): string {
+  const payload = Buffer.from(JSON.stringify({ sourceSessionId, newSessionId }), "utf8").toString("base64url");
+  return `${FORK_DESCRIPTOR_PREFIX}${payload}`;
+}
+
+function parseForkDescriptor(value: string): { sourceSessionId: string; newSessionId: string } | null {
+  if (!value.startsWith(FORK_DESCRIPTOR_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(FORK_DESCRIPTOR_PREFIX.length), "base64url").toString("utf8"));
+    if (!parsed?.sourceSessionId || !parsed?.newSessionId) return null;
+    return { sourceSessionId: parsed.sourceSessionId, newSessionId: parsed.newSessionId };
+  } catch {
+    return null;
+  }
+}
 
 const mapPermissionMode = (mode: string | undefined): string => {
   switch (mode) {
@@ -184,6 +205,8 @@ export class CodebuddyAgent {
   private proc: ChildProcess | null = null;
   private projectPath = "";
   private _sessionFilePath: string | null = null;
+  /** fork 会话：源 session + 新 session id，CLI 用 --resume --fork-session 启动。 */
+  private pendingFork: { sourceSessionId: string; newSessionId: string } | null = null;
   private eventBuffer: AgentEventBuffer;
   private models: AgentModel[] = [];
   /** 技能名 → 技能正文，供 listActions 与发送时复用。 */
@@ -202,6 +225,14 @@ export class CodebuddyAgent {
   private usageReported = false;
   private contextReported = false;
   private resultSeen = false;
+  /** 已写入 stdin、还没拿到对应 result 的引导条数。 */
+  private pendingGuidance = 0;
+  private guidanceTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** Plan 模式下 TaskCreate/TaskUpdate 构建的步骤（CLI 自己规划，Hpp 负责展示）。 */
+  private planSteps: AgentProcessStep[] = [];
+  private taskToolIds = new Map<string, string>();
+  /** 本轮是否在 Plan 模式（ExitPlanMode 后要主动收尾）。 */
+  private planModeActive = false;
   private stderrTail = "";
   private compactId: string | null = null;
   private compactBoundarySeen = false;
@@ -232,7 +263,10 @@ export class CodebuddyAgent {
 
   async init(projectPath: string, existingSessionFilePath?: string, options?: AgentInitOptions): Promise<void> {
     this.projectPath = projectPath || process.cwd();
-    this._sessionFilePath = String(existingSessionFilePath || "").trim() || null;
+    const rawSession = String(existingSessionFilePath || "").trim();
+    this.pendingFork = parseForkDescriptor(rawSession);
+    // fork 描述符不是真的 CLI session id：先记下源/新 id，等 CLI init 回报真实 id。
+    this._sessionFilePath = this.pendingFork ? null : (rawSession || null);
     this.emit({ type: "agent_init", agentId: "codebuddy" });
     await this.loadProviderConfig(true);
 
@@ -262,6 +296,7 @@ export class CodebuddyAgent {
 
     const revision = ++this.turnRevision;
     this.resetTurnState();
+    this.planModeActive = !!options?.planModeEnabled;
     this.turnActive = true;
     // 渠道切换发生在会话重载时，而重载可能早于 activeProviderId 落盘；每轮
     // 重新读一次配置，保证账号 token / LOCALAPPDATA / baseUrl 跟着当前渠道走。
@@ -303,14 +338,13 @@ export class CodebuddyAgent {
     const messageText = skill ? buildSkillPrompt(skill, message) : message;
     const systemPrompt = String(options?.hostSystemPrompt || "").trim();
     const promptText = systemPrompt && !complexArgs ? `${systemPrompt}\n\n${messageText}` : messageText;
-    const input = validImages.length > 0
-      ? buildStreamJsonUserMessage(promptText, validImages)
-      : promptText;
+    const input = buildStreamJsonUserMessage(promptText, validImages);
     const started = this.spawnTurn(
       cli,
       this.buildArgs(options, validImages.length > 0, complexArgs),
       input,
       revision,
+      true,
     );
     if (!started.ok) {
       this.failTurn(revision, started.error);
@@ -375,6 +409,27 @@ export class CodebuddyAgent {
     }
   }
 
+  /**
+   * 原生 fork：CLI 的 --fork-session 按整个会话复制，不支持按消息回滚，
+   * 所以新会话会带完整历史；Hpp 侧仍会显示从选中消息开始的可见历史。
+   */
+  async forkSession(target: AgentForkTarget): Promise<AgentForkResult> {
+    const source = String(target.sourceSessionFilePath || this._sessionFilePath || "").trim();
+    const newId = String(target.newSessionId || "").trim();
+    if (!source || !newId) {
+      return { supported: true, success: false, reason: "缺少源会话或新会话 ID" };
+    }
+    if (!UUID_TOKEN.test(source) || !UUID_TOKEN.test(newId)) {
+      return { supported: true, success: false, reason: "会话 ID 含非法字符" };
+    }
+    return {
+      supported: true,
+      success: true,
+      sessionFilePath: createForkDescriptor(source, newId),
+      nativeEntryId: target.targetTurnId,
+    };
+  }
+
   async abort(): Promise<void> {
     const revision = this.turnRevision;
     this.killProcess();
@@ -386,6 +441,7 @@ export class CodebuddyAgent {
     this.turnRevision += 1;
     this.turnActive = false;
     this.proc = null;
+    this.clearGuidanceTimeout();
     this.eventBuffer.clear();
     this.emit({ type: "aborted" });
   }
@@ -451,6 +507,7 @@ export class CodebuddyAgent {
     }
     this.turnActive = false;
     this.turnRevision += 1;
+    this.clearGuidanceTimeout();
     const resolve = this.compactResolve;
     this.compactResolve = null;
     if (resolve) {
@@ -469,6 +526,11 @@ export class CodebuddyAgent {
     this.usageReported = false;
     this.contextReported = false;
     this.resultSeen = false;
+    this.pendingGuidance = 0;
+    this.clearGuidanceTimeout();
+    this.planSteps = [];
+    this.taskToolIds.clear();
+    this.planModeActive = false;
     this.stderrTail = "";
     this.toolNames.clear();
     this.startedTools.clear();
@@ -483,6 +545,7 @@ export class CodebuddyAgent {
     args: string[],
     prompt: string,
     revision: number,
+    keepStdinOpen = false,
   ): { ok: true } | { ok: false; error: string } {
     const invocation = buildCodebuddyInvocation(cli, args);
     const env: Record<string, string> = {};
@@ -530,7 +593,9 @@ export class CodebuddyAgent {
 
     try {
       proc.stdin?.write(prompt);
-      proc.stdin?.end();
+      // stream-json 输入下 CLI 会在 result 后继续等输入：普通回合保持 stdin 打开，
+      // 让 sendGuidance 能追加消息；/compact 用 text 输入，必须立即关闭。
+      if (!keepStdinOpen) proc.stdin?.end();
     } catch {
       // stdin 关闭意味着进程已经退出，close 分支会收尾。
     }
@@ -643,13 +708,17 @@ export class CodebuddyAgent {
     return env;
   }
 
-  private buildArgs(options: AgentSendOptions = {}, hasImages = false, allowSystemPrompt = true): string[] {
+  private buildArgs(options: AgentSendOptions = {}, _hasImages = false, allowSystemPrompt = true): string[] {
     const args = ["-p", "--output-format", "stream-json", "--include-partial-messages"];
-    // 带图片时改走 stream-json 输入；纯文字继续用默认的 text 输入。
-    if (hasImages) args.push("--input-format", "stream-json");
+    // 统一走 stream-json 输入：运行中可以用 sendGuidance 往同一个进程追加消息。
+    args.push("--input-format", "stream-json");
     const permission = options.planModeEnabled ? "plan" : mapPermissionMode(options.permissionMode);
     args.push("--permission-mode", permission);
-    if (this._sessionFilePath && SAFE_ARG_TOKEN.test(this._sessionFilePath)) {
+    if (this.pendingFork) {
+      // CLI 的 fork 是整会话复制（不支持按消息回滚），但能拿到独立 session id。
+      args.push("--resume", this.pendingFork.sourceSessionId);
+      args.push("--fork-session", "--session-id", this.pendingFork.newSessionId);
+    } else if (this._sessionFilePath && SAFE_ARG_TOKEN.test(this._sessionFilePath)) {
       args.push("--resume", this._sessionFilePath);
     }
     if (this.modelId && this.modelId !== "auto" && SAFE_ARG_TOKEN.test(this.modelId)) {
@@ -720,6 +789,8 @@ export class CodebuddyAgent {
       const sessionId = optionalString(event.session_id);
       if (sessionId && sessionId !== this._sessionFilePath) {
         this._sessionFilePath = sessionId;
+        // fork 首轮已经落地成独立 session，后续轮次直接 --resume 它。
+        this.pendingFork = null;
         this.emit({ type: "session_file_path", sessionFilePath: sessionId });
       }
       const model = optionalString(event.model);
@@ -803,6 +874,7 @@ export class CodebuddyAgent {
   }
 
   private handleStreamEvent(event: UnknownRecord): void {
+    this.ensureMidTurnStreamStart();
     const sse = asRecord(event.event);
     const sseType = optionalString(sse.type);
     if (sseType === "message_start") {
@@ -839,7 +911,67 @@ export class CodebuddyAgent {
     }
   }
 
+  /** 引导追加的新一轮响应到来时，重新开一个气泡（上一轮 result 已经收过 stream_end）。 */
+  private ensureMidTurnStreamStart(): void {
+    if (!this.resultSeen) return;
+    this.resultSeen = false;
+    this.emit({ type: "stream_start", role: "assistant" });
+  }
+
+  /** 把 CLI 的 TaskCreate/TaskUpdate 工具转成 Hpp 的原生计划步骤。 */
+  private handleTaskTool(toolCallId: string, toolName: string, input: Record<string, unknown>): boolean {
+    if (toolName === "TaskCreate") {
+      const title = optionalString(input.subject) || optionalString(input.title);
+      if (!title) return true;
+      const step: AgentProcessStep = {
+        id: `codebuddy-task-${this.planSteps.length + 1}-${toolCallId}`,
+        title,
+        status: "pending",
+      };
+      this.planSteps = [...this.planSteps, step];
+      this.taskToolIds.set(toolCallId, step.id);
+      this.emitPlanSteps();
+      return true;
+    }
+    if (toolName === "TaskUpdate") {
+      this.taskToolIds.set(toolCallId, "");
+      const taskId = optionalString(input.taskId) || optionalString(input.task_id);
+      const status = optionalString(input.status);
+      if (!taskId) return true;
+      // CLI 的 taskId 是 "1"/"2"...，对应我们按创建顺序记的步骤。
+      const index = Number(taskId) - 1;
+      const step = this.planSteps[index];
+      if (step) {
+        const normalized = status === "in_progress" ? "running"
+          : status === "completed" ? "completed" : step.status;
+        this.planSteps = this.planSteps.map((item, i) => (i === index ? { ...item, status: normalized } : item));
+        this.emitPlanSteps();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * ExitPlanMode 到了：CLI 在等用户批准，不会自己给 result。
+   * 关掉 stdin 让它退出，由 close 路径正常收尾。Hpp 的 Plan 开关就是"批准"——
+   * 用户关掉开关再发消息，下一轮按普通模式执行计划。
+   */
+  private finishPlanTurn(): void {
+    this.resultSeen = true;
+    this.closeStdin();
+    // CLI 可能仍在等批准结果而不退出；给一点时间后强制结束。
+    setTimeout(() => {
+      if (this.turnActive) this.killProcess();
+    }, 3000).unref?.();
+  }
+
+  private emitPlanSteps(): void {
+    this.emit({ type: "plan_update", steps: this.planSteps.map((step) => ({ ...step })) });
+  }
+
   private handleAssistantMessage(event: UnknownRecord): void {
+    this.ensureMidTurnStreamStart();
     const message = asRecord(event.message);
     const parentToolCallId = optionalString(event.parent_tool_use_id);
     for (const rawBlock of asArray(message.content)) {
@@ -873,6 +1005,16 @@ export class CodebuddyAgent {
         this.toolNames.set(toolCallId, toolName);
         if (this.startedTools.has(toolCallId)) continue;
         this.startedTools.add(toolCallId);
+        // Plan 模式下 CLI 用 TaskCreate/TaskUpdate 表达计划步骤。它们转成
+        // plan_update，不显示成普通工具卡片（与 WorkBuddy 桌面端一致）。
+        if (this.handleTaskTool(toolCallId, toolName, asRecord(block.input))) continue;
+        // ExitPlanMode 只是"计划已完成"的信号，CLI 不会给 result（它等用户批准），
+        // 不显示成工具卡片。收到它就收尾本轮，把裁定权交回 Hpp 的 Plan 开关。
+        if (this.planModeActive && toolName === "ExitPlanMode") {
+          this.taskToolIds.set(toolCallId, "");
+          this.finishPlanTurn();
+          continue;
+        }
         this.emit(normalizeToolEvent("tool_start", {
           toolName,
           toolCallId,
@@ -893,6 +1035,8 @@ export class CodebuddyAgent {
       const toolCallId = optionalString(block.tool_use_id);
       if (!toolCallId || this.finishedTools.has(toolCallId)) continue;
       this.finishedTools.add(toolCallId);
+      // Task 工具已转成 plan_update，不要再发一条孤立的 tool_end。
+      if (this.taskToolIds.has(toolCallId)) continue;
       this.emit(normalizeToolEvent("tool_end", {
         toolName: this.toolNames.get(toolCallId) || "tool",
         toolCallId,
@@ -936,9 +1080,87 @@ export class CodebuddyAgent {
         detail,
         state: "error",
       });
+      this.pendingGuidance = 0;
+      this.resultSeen = true;
+      this.closeStdin();
+      return;
     }
     this.resultSeen = true;
-    this.finishTurn(revision);
+    if (this.pendingGuidance > 0) {
+      // 这条 result 属于引导追加之前的回合：收掉当前气泡，但保持进程和 stdin 打开，
+      // 追加的消息会产生新的 assistant + result，由那一条 result 负责收尾。
+      this.pendingGuidance -= 1;
+      this.emit({ type: "stream_end" });
+      this.streamedText = false;
+      this.thinkingOpen = false;
+      this.thinkingStreamed = false;
+      this.usageReported = false;
+      this.contextReported = false;
+      return;
+    }
+    // 没有等待中的引导：关闭 stdin 让 CLI 退出，由 close 统一收尾。
+    this.closeStdin();
+  }
+
+  private closeStdin(): void {
+    const stdin = this.proc?.stdin;
+    if (!stdin || stdin.writableEnded) return;
+    try {
+      stdin.end();
+    } catch {
+      // 进程可能已经退出，close 分支会收尾。
+    }
+  }
+
+  private clearGuidanceTimeout(): void {
+    if (!this.guidanceTimeout) return;
+    clearTimeout(this.guidanceTimeout);
+    this.guidanceTimeout = null;
+  }
+
+  /**
+   * 运行中往当前 CLI 进程追加一条用户消息（Hpp 的“引导/插入对话”）。
+   *
+   * CLI 的 stream-json 输入支持多轮：追加的消息会在当前响应 result 之后被处理，
+   * 产生新的 assistant + result。最后一条 result 到达时 Hpp 才关闭 stdin。
+   */
+  async sendGuidance(
+    message: string,
+    images?: AgentImagePayload,
+    _options?: AgentSendOptions,
+  ): Promise<{ guidanceId: string }> {
+    if (this.turnKind !== "chat" || !this.turnActive || !this.proc) {
+      throw new Error("SESSION_NOT_RUNNING");
+    }
+    const stdin = this.proc.stdin;
+    if (!stdin || stdin.writableEnded || stdin.destroyed) throw new Error("SESSION_NOT_RUNNING");
+
+    const guidanceId = `codebuddy-guidance-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const input = buildStreamJsonUserMessage(message, normalizeImagePayload(images));
+    try {
+      stdin.write(input);
+    } catch (error) {
+      throw new Error(`写入引导消息失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.pendingGuidance += 1;
+    // 告诉渲染层这条引导已经交付给 CLI，否则队列项会一直停在“等待插入”，
+    // 要等 GUIDANCE_CONFIRM_TIMEOUT_MS 兜底才确认（本机已经能复现这种卡顿）。
+    this.emit({ type: "guidance_response_started" });
+    this.clearGuidanceTimeout();
+    this.guidanceTimeout = setTimeout(() => {
+      this.guidanceTimeout = null;
+      if (this.pendingGuidance <= 0) return;
+      // CLI 没给追加消息任何结果：杀掉进程并结束回合，不能让会话一直占用。
+      this.pendingGuidance = 0;
+      this.killProcess();
+    }, 60_000);
+    this.guidanceTimeout.unref?.();
+    return { guidanceId };
+  }
+
+  async cancelGuidance(_guidanceId: string): Promise<{ cancelled: boolean; reason?: string }> {
+    // 消息已经写进 stdin，CLI 侧没有撤回接口。
+    return { cancelled: false, reason: "CodeBuddy 引导消息已发出，无法撤回。" };
   }
 
   private emitUsage(usage: UnknownRecord): void {
@@ -1020,6 +1242,7 @@ export class CodebuddyAgent {
     this.turnRevision += 1;
     this.turnActive = false;
     this.proc = null;
+    this.clearGuidanceTimeout();
     this.emit({ type: "stream_end" });
     this.emit({ type: "agent_end" });
   }

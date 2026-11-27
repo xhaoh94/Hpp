@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import artifactsSource from "./MessageArtifacts.tsx?raw";
 import { MessageArtifacts } from "./MessageArtifacts";
 import { collectMessageArtifacts } from "@/lib/message-artifacts";
 import type { ChatMessage } from "@/stores/chat-store";
@@ -42,5 +43,11 @@ describe("产物清单渲染探针", () => {
     // 收起态只显示计数；文件名在展开后才有。
     expect(html).toContain("产物 1");
     expect(html).toContain("chat-artifacts");
+  });
+
+  it("产物行只显示文件名，不显示路径", () => {
+    // 路径仍保留在 title 里供 hover 定位，但不再作为可见文本渲染。
+    expect(artifactsSource).not.toContain('className="chat-artifact-path"');
+    expect(artifactsSource).toContain("title={artifact.path}");
   });
 });

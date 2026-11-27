@@ -98,7 +98,6 @@ export const MessageArtifacts = memo(function MessageArtifacts({
                   <span className="chat-artifact-icon"><Icon size={13} strokeWidth={1.9} /></span>
                 )}
                 <span className="chat-artifact-name">{artifact.name}</span>
-                <span className="chat-artifact-path">{artifact.path}</span>
               </button>
             );
           })}
